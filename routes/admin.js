@@ -11,11 +11,10 @@ const { createAuditLog } = require('../utils/audit');
 // ===== REDIS SESSION STORE =====
 const redis = require('redis');
 const redisClient = redis.createClient({
-    url: process.env.REDIS_URL,
-    socket: {
-        tls: true,  // Upstash requires TLS
-        reconnectStrategy: (retries) => Math.min(retries * 100, 3000)
-    }
+  url: process.env.REDIS_URL,
+  socket: {
+    reconnectStrategy: (retries) => Math.min(retries * 100, 3000)
+  }
 });
 
 redisClient.on('error', (err) => {
@@ -119,7 +118,7 @@ router.post('/session', async (req, res) => {
 
     // Store session in Redis
     try {
-        await redisClient.setex(
+        await redisClient.setEx(
             SESSION_PREFIX + token,
             SESSION_TTL,
             JSON.stringify(sessionData)

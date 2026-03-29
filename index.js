@@ -1,12 +1,12 @@
-const express   = require('express');
-const mongoose  = require('mongoose');
-const cors      = require('cors');
-const helmet    = require('helmet');
-const rateLimit = require('express-rate-limit');
-const csrf      = require('csurf');
+const express      = require('express');
+const mongoose     = require('mongoose');
+const cors         = require('cors');
+const helmet       = require('helmet');
+const rateLimit    = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
+const csrf         = require('csurf');
 const cookieParser = require('cookie-parser');
 require('dotenv').config();
-
 const app = express();
 
 // ===== TRUST PROXY (for production behind load balancer) =====
@@ -64,7 +64,7 @@ app.use(cookieParser(process.env.COOKIE_SECRET || 'your-cookie-secret'));
 const csrfProtection = csrf({
   cookie: {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: true, 
     sameSite: 'none'
   }
 });
