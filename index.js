@@ -26,6 +26,17 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// ===== ADMIN RATE LIMITER =====
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                   // only 10 attempts per window
+  message: 'Too many admin requests, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // only failed requests count toward the limit
+});
+app.use('/api/admin', adminLimiter);
+
 // ===== HEALTH CHECK =====
 app.get('/', (req, res) => {
   res.json({ message: '✅ Battle Destroyer API is running' });
@@ -35,6 +46,7 @@ app.get('/', (req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/panel', require('./routes/panel'));
 app.use('/api/admin', require('./routes/admin'));
+
 // ===== 404 HANDLER =====
 app.use((req, res) => {
   res.status(404).json({ message: '❌ Route not found' });
