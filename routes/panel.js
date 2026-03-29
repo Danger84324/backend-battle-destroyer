@@ -43,8 +43,11 @@ router.post('/attack', auth, async (req, res) => {
     if (!ipRegex.test(ip)) {
       return res.status(400).json({ message: 'Invalid IP address format' });
     }
-    // Reject private/loopback ranges
+    // Validate each octet is 0-255
     const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
+      return res.status(400).json({ message: 'Invalid IP address format' });
+    }
     const isPrivate =
       parts[0] === 10 ||
       parts[0] === 127 ||
