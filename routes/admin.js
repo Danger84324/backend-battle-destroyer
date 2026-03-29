@@ -1,6 +1,7 @@
 const express  = require('express');
 const router   = express.Router();
 const bcrypt   = require('bcryptjs');
+const crypto   = require('crypto');
 const User     = require('../models/User');
 const Reseller = require('../models/Reseller');
 
@@ -16,7 +17,14 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
-function adminAuth(req, res, next) {
+// ===== SINGLE-SESSION MANAGEMENT =====
+// Only one active admin session token at a time.
+// Logging in from a new device/tab invalidates the previous session.
+let activeSession = null; // { token, createdAt, ip, userAgent }
+const SESSION_TTL = 8 * 60 * 60 * 1000; // 8 hours
+
+// POST /api/admin/session — exchange secret for a session token
+router.post('/session', (req, res) => {
   const ip     = req.ip;
   const now    = Date.now();
   const record = failedAttempts.get(ip) || { count: 0, lockedUntil: 0 };
@@ -26,7 +34,7 @@ function adminAuth(req, res, next) {
     return res.status(429).json({ message: `Too many failed attempts. Try again in ${s}s.` });
   }
 
-  const secret = req.headers['x-admin-secret'];
+  const { secret } = req.body;
   if (!secret || secret !== process.env.ADMIN_SECRET) {
     record.count += 1;
     if (record.count >= MAX_ATTEMPTS) {
@@ -37,11 +45,63 @@ function adminAuth(req, res, next) {
     }
     failedAttempts.set(ip, record);
     return res.status(401).json({
-      message: `Unauthorized. ${MAX_ATTEMPTS - record.count} attempts remaining.`
+      message: `Invalid secret. ${MAX_ATTEMPTS - record.count} attempts remaining.`
     });
   }
 
   failedAttempts.delete(ip);
+
+  // Issue new token — this immediately kills any existing session
+  const token = crypto.randomBytes(48).toString('hex');
+  activeSession = {
+    token,
+    createdAt: now,
+    ip,
+    userAgent: req.headers['user-agent'] || 'unknown',
+  };
+
+  res.json({ token, expiresIn: SESSION_TTL });
+});
+
+// DELETE /api/admin/session — explicit logout
+router.delete('/session', (req, res) => {
+  const token = req.headers['x-admin-token'];
+  if (activeSession && activeSession.token === token) {
+    activeSession = null;
+  }
+  res.json({ message: 'Logged out' });
+});
+
+// GET /api/admin/session/check — frontend heartbeat
+router.get('/session/check', (req, res) => {
+  const token = req.headers['x-admin-token'];
+  if (!activeSession || activeSession.token !== token) {
+    return res.status(401).json({ message: 'SESSION_INVALIDATED' });
+  }
+  if (Date.now() - activeSession.createdAt > SESSION_TTL) {
+    activeSession = null;
+    return res.status(401).json({ message: 'SESSION_EXPIRED' });
+  }
+  res.json({ ok: true });
+});
+
+// ===== AUTH MIDDLEWARE (secret + session token) =====
+function adminAuth(req, res, next) {
+  const ip    = req.ip;
+  const now   = Date.now();
+  const token = req.headers['x-admin-token'];
+
+  // Must have a valid active session token
+  if (!token || !activeSession || activeSession.token !== token) {
+    return res.status(401).json({ message: 'SESSION_INVALIDATED' });
+  }
+
+  // Check session expiry
+  if (now - activeSession.createdAt > SESSION_TTL) {
+    activeSession = null;
+    return res.status(401).json({ message: 'SESSION_EXPIRED' });
+  }
+
   next();
 }
 
