@@ -101,7 +101,7 @@ const adminLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   keyGenerator: (req) => {
-    return `${req.ip.replace(/^.*:/, '')}:${req.headers['x-admin-token'] || 'anonymous'}`;
+    return `${ipKeyGenerator(req)}:${req.headers['x-admin-token'] || 'anonymous'}`;
   },
   validate: { trustProxy: false, xForwardedForHeader: false }
 });
@@ -116,7 +116,7 @@ const resellerLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: true,
   keyGenerator: (req) => {
-    return `${req.ip.replace(/^.*:/, '')}:${req.resellerId || 'anonymous'}`;
+    return `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`;
   },
   validate: { trustProxy: false, xForwardedForHeader: false }
 });
