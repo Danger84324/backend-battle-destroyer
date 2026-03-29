@@ -1,7 +1,7 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const helmet = require('helmet');
+const express   = require('express');
+const mongoose  = require('mongoose');
+const cors      = require('cors');
+const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
@@ -12,13 +12,13 @@ app.set('trust proxy', 1);
 
 // ===== SECURITY =====
 app.use(helmet());
-app.use(cors({ 
-  origin: process.env.CLIENT_URL || 'http://localhost:3000', 
-  credentials: true 
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  credentials: true
 }));
 app.use(express.json());
 
-// ===== RATE LIMITING =====
+// ===== GLOBAL RATE LIMITER =====
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 50,
@@ -26,16 +26,27 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// ===== ADMIN RATE LIMITER =====
+// ===== ADMIN RATE LIMITER (strict) =====
 const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,                   // only 10 attempts per window
+  windowMs: 15 * 60 * 1000,
+  max: 10,
   message: 'Too many admin requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: true, // only failed requests count toward the limit
+  skipSuccessfulRequests: true,
 });
 app.use('/api/admin', adminLimiter);
+
+// ===== RESELLER RATE LIMITER =====
+const resellerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: 'Too many reseller requests, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+});
+app.use('/api/reseller', resellerLimiter);
 
 // ===== HEALTH CHECK =====
 app.get('/', (req, res) => {
@@ -43,9 +54,10 @@ app.get('/', (req, res) => {
 });
 
 // ===== ROUTES =====
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/panel', require('./routes/panel'));
-app.use('/api/admin', require('./routes/admin'));
+app.use('/api/auth',     require('./routes/auth'));
+app.use('/api/panel',    require('./routes/panel'));
+app.use('/api/admin',    require('./routes/admin'));
+app.use('/api/reseller', require('./routes/reseller'));
 
 // ===== 404 HANDLER =====
 app.use((req, res) => {
@@ -55,8 +67,8 @@ app.use((req, res) => {
 // ===== ERROR HANDLER =====
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err);
-  res.status(err.status || 500).json({ 
-    message: err.message || 'Server error' 
+  res.status(err.status || 500).json({
+    message: err.message || 'Server error'
   });
 });
 
