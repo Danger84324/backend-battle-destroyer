@@ -190,6 +190,7 @@ router.post('/signup', async (req, res) => {
                 credits:       user.credits,
                 referralCode:  user.referralCode,
                 referralCount: user.referralCount,
+                isPro:         user.isPro,
             },
         });
 
@@ -250,6 +251,7 @@ router.post('/login', async (req, res) => {
                 credits:       user.credits,
                 referralCode:  user.referralCode,
                 referralCount: user.referralCount,
+                isPro:         user.isPro,
             },
         });
 
