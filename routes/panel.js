@@ -96,27 +96,6 @@ router.get('/attack-status', auth, async (req, res) => {
     }
 });
 
-// ─── POST /api/panel/stop-attack ─────────────────────────────────────────────
-router.post('/stop-attack', auth, async (req, res) => {
-    try {
-        const attackInfo = activeAttacks.get(req.user.id.toString());
-
-        if (!attackInfo) {
-            return res.status(400).json({ message: 'No active attack found' });
-        }
-
-        // Stop all servers that were started — using internal _activeUrls
-        await bgmiService.stopServers(attackInfo._activeUrls);
-
-        activeAttacks.delete(req.user.id.toString());
-
-        return res.json({ message: 'Attack stopped successfully' });
-    } catch (err) {
-        console.error('Stop attack error:', err);
-        res.status(500).json({ message: 'Server error. Please try again.' });
-    }
-});
-
 // ─── POST /api/panel/attack ───────────────────────────────────────────────────
 router.post('/attack', auth, async (req, res) => {
     try {
