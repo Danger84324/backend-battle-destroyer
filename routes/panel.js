@@ -109,6 +109,16 @@ router.post('/attack', auth, async (req, res) => {
             return res.status(400).json({ message: 'IP, port, and duration are required' });
         }
 
+
+        const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip;
+        const captchaResult = await verifyTurnstile(captchaToken, clientIp);
+        if (!captchaResult.success) {
+            return res.status(403).json({
+                message: 'Captcha verification failed. Please try again.',
+                errors: captchaResult['error-codes']
+            });
+        }
+
         // IP validation
         const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
         if (!ipRegex.test(ip)) {
@@ -180,11 +190,20 @@ router.post('/attack', auth, async (req, res) => {
         );
 
         // If external API failed
-        if (response.status !== 200) {
+        // handle external errors
+        if (response.status !== 200 || response.data?.error) {
+
             console.error('External API failed:', response.data);
 
-            return res.status(response.status).json({
-                message: "Failed to start attack",
+            if (response.data?.error?.includes("Max concurrent")) {
+                return res.status(429).json({
+                    message: "Server is busy. Too many attacks running. Please wait 5 seconds and try again.",
+                    cooldown: 5
+                });
+            }
+
+            return res.status(response.status || 400).json({
+                message: response.data?.error || "Failed to start attack",
                 external: response.data
             });
         }
