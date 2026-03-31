@@ -66,15 +66,22 @@ function validatePassword(password) {
 }
 
 // ─── SIGNUP  POST /api/auth/signup ────────────────────────────────────────────
+// ─── SIGNUP  POST /api/auth/signup ────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
     const { username, email, password, captchaToken, fingerprint, referralCode } = req.body;
-    const ip = req.ip;
 
-    if (!username || !email || !password || !captchaToken || !fingerprint) {
+    // ── Normalize IP (fixes localhost IPv6 variants) ──
+    let ip = req.ip || '';
+    if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+    if (ip === '::1') ip = '127.0.0.1';
+
+    // ── Required fields ──
+    if (!username || !email || !password || !captchaToken) {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
+    // ── CAPTCHA ──
     const captcha = await verifyTurnstile(captchaToken, ip);
     if (!captcha.success) {
       return res.status(400).json({
@@ -85,59 +92,85 @@ router.post('/signup', async (req, res) => {
       });
     }
 
+    // ── Password strength ──
     const pwErrors = validatePassword(password);
     if (pwErrors.length) return res.status(400).json({ message: pwErrors[0] });
 
+    // ── Username format ──
     if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
       return res.status(400).json({ message: 'Username must be 3–20 alphanumeric characters' });
     }
 
+    // ── Duplicate check ──
     const exists = await User.findOne({ $or: [{ email }, { username }] });
     if (exists) return res.status(400).json({ message: 'Email or username already taken' });
 
+    // ── Referral code check ──
     let referrer = null;
     if (referralCode) {
       referrer = await User.findOne({ referralCode: referralCode.trim() });
       if (!referrer) return res.status(400).json({ message: 'Invalid referral code' });
     }
 
-    const abuseCheck = await User.findOne({ $or: [{ ipAddress: ip }, { fingerprint }] });
+    // ── Abuse check ──
+    // Build query only for fields we actually have
+    // Localhost IPs are excluded so dev/testing always gets 3 credits
+    const isLocalhost = ip === '127.0.0.1';
+    const abuseOrClauses = [];
 
+    if (!isLocalhost && ip) abuseOrClauses.push({ ipAddress: ip });
+    if (fingerprint) abuseOrClauses.push({ fingerprint });
+
+    const abuseCheck = abuseOrClauses.length > 0
+      ? await User.findOne({ $or: abuseOrClauses })
+      : null;
+
+    // Self-referral guard
     if (referrer && abuseCheck && abuseCheck._id.toString() === referrer._id.toString()) {
       return res.status(400).json({ message: 'Cannot use your own referral code' });
     }
 
+    // ── Decide credits ──
+    // New unique user → 3 free credits
+    // Duplicate IP/fingerprint → 0 credits (abuse prevention)
+    const isNewUniqueUser = !abuseCheck;
+    const startingCredits = isNewUniqueUser ? 3 : 0;
+
+    console.log(`[Signup] ${username} | IP: ${ip} | abuse: ${!!abuseCheck} | credits: ${startingCredits}`);
+
+    // ── Create user ──
     const hashed = await bcrypt.hash(password, 12);
 
     const user = new User({
       username,
       email,
       password: hashed,
-      credits: !abuseCheck ? 3 : 0,
-      ipAddress: ip,
-      fingerprint,
-      creditGiven: !abuseCheck,
+      credits: startingCredits,
+      ipAddress: isLocalhost ? null : ip,  // don't store localhost IP
+      fingerprint: fingerprint || null,
+      creditGiven: isNewUniqueUser,
       referredBy: referrer ? referrer.referralCode : null,
-      // FIX: Do NOT set referralCode here — pre('save') hook handles it.
-      // Setting it here meant userId was still undefined at this point,
-      // so referralCode would be saved as undefined → duplicate key crash.
+      // referralCode & userId set by pre('save') hook
     });
 
-    // pre('save') sets both user.userId and user.referralCode atomically
     await user.save();
 
-    if (referrer && !abuseCheck) {
+    // ── Reward referrer ──
+    if (referrer && isNewUniqueUser) {
       await User.findByIdAndUpdate(referrer._id, {
         $inc: { credits: 2, referralCount: 1 }
       });
+      console.log(`[Referral] ${referrer.username} +2 credits for referring ${username}`);
     }
 
+    // ── JWT ──
     const token = jwt.sign(
       { id: user._id, userId: user.userId },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
+    // ── Global stats ──
     await Stats.findByIdAndUpdate(
       'global',
       { $inc: { totalUsers: 1 } },
@@ -158,16 +191,12 @@ router.post('/signup', async (req, res) => {
       },
     });
 
-
-
   } catch (err) {
     console.error('Signup error:', err);
 
-    // FIX: Surface MongoDB duplicate-key errors clearly during development.
-    // Code 11000 = unique index violation (e.g. duplicate email/username/referralCode).
     if (err.code === 11000) {
       const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      return res.status(400).json({ message: `Duplicate value for ${field}. Please try again.` });
+      return res.status(400).json({ message: `${field} already taken. Please try again.` });
     }
 
     return res.status(500).json({ message: 'Server error. Please try again.' });
