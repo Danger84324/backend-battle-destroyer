@@ -10,6 +10,17 @@ const AuditLog = require('../models/AuditLog');
 const validation = require('../utils/validation');
 const { createAuditLog } = require('../utils/audit');
 
+
+const PLANS = [
+  { label: 'Starter',  credits: 50  },
+  { label: 'Basic',    credits: 150 },
+  { label: 'Standard', credits: 250 },
+  { label: 'Advanced', credits: 333 },
+  { label: 'Pro',      credits: 400 },
+  { label: 'Elite',    credits: 500 },
+];
+
+
 // ===== RATE LIMITERS =====
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -326,121 +337,69 @@ router.get('/search-user', resellerAuth, actionLimiter, async (req, res) => {
 router.post('/give-credits', resellerAuth, actionLimiter, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
-
     if (!reseller || reseller.isBlocked) {
       return res.status(403).json({ message: 'Account is not active' });
     }
 
-    const { userId, amount } = req.body;
+    const { userId, planLabel } = req.body;
 
     if (!userId || typeof userId !== 'string') {
       return res.status(400).json({ message: 'userId is required' });
     }
 
-    if (amount === undefined || amount === null) {
-      return res.status(400).json({ message: 'amount is required' });
+    // Validate plan
+    const plan = PLANS.find(p => p.label === planLabel);
+    if (!plan) {
+      return res.status(400).json({
+        message: `Invalid plan. Choose from: ${PLANS.map(p => p.label).join(', ')}`
+      });
+    }
+
+    const credits = plan.credits;
+
+    if (reseller.credits < credits) {
+      return res.status(400).json({
+        message: `Insufficient credits. You have ${reseller.credits}, plan requires ${credits}.`
+      });
     }
 
     const sanitizedUserId = validation.sanitizeString(userId.trim(), 100);
-
-    if (sanitizedUserId.length < 1) {
-      return res.status(400).json({ message: 'Invalid userId' });
-    }
-
-    if (!validation.validateCredits(amount, 100000)) {
-      return res.status(400).json({
-        message: 'Amount must be an integer between 1 and 100,000'
-      });
-    }
-
-    const credits = parseInt(amount, 10);
-
-    if (reseller.credits < credits) {
-      await createAuditLog({
-        actorType: 'reseller',
-        actorId: reseller._id,
-        action: 'GIVE_CREDITS',
-        ip: req.ip,
-        userAgent: req.headers['user-agent'],
-        success: false,
-        error: `Insufficient credits. Has ${reseller.credits}, requested ${credits}`
-      });
-
-      return res.status(400).json({
-        message: `Insufficient credits. You have ${reseller.credits}.`
-      });
-    }
-
     const user = await User.findOne({
-      $or: [
-        { userId: sanitizedUserId },
-        { email: sanitizedUserId.toLowerCase() }
-      ]
+      $or: [{ userId: sanitizedUserId }, { email: sanitizedUserId.toLowerCase() }]
     });
 
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ message: 'User not found' });
 
-    const userOldCredits = user.credits;
-    const resellerOldCredits = reseller.credits;
-    const userNewCredits = user.credits + credits;
+    const userNewCredits   = user.credits + credits;
     const resellerNewCredits = reseller.credits - credits;
 
-    try {
-      await Promise.all([
-        User.findByIdAndUpdate(user._id, {
-          $inc: { credits: credits },
-          isPro: true,
-          creditGiven: true,
-        }),
-        Reseller.findByIdAndUpdate(reseller._id, {
-          $inc: { credits: -credits, totalGiven: credits },
-        }),
-      ]);
+    await Promise.all([
+      User.findByIdAndUpdate(user._id, {
+        $inc: { credits },
+        isPro: true,
+        creditGiven: true,
+      }),
+      Reseller.findByIdAndUpdate(reseller._id, {
+        $inc: { credits: -credits, totalGiven: credits },
+      }),
+    ]);
 
-      await createAuditLog({
-        actorType: 'reseller',
-        actorId: reseller._id,
-        action: 'GIVE_CREDITS',
-        targetId: user._id,
-        targetType: 'user',
-        changes: {
-          user: {
-            credits: { old: userOldCredits, new: userNewCredits },
-            isPro: true
-          },
-          reseller: {
-            credits: { old: resellerOldCredits, new: resellerNewCredits }
-          }
-        },
-        ip: req.ip,
-        userAgent: req.headers['user-agent'],
-        success: true
-      });
+    await createAuditLog({
+      actorType: 'reseller', actorId: reseller._id,
+      action: 'GIVE_CREDITS',
+      targetId: user._id, targetType: 'user',
+      changes: { plan: plan.label, credits, userNewCredits, resellerNewCredits },
+      ip: req.ip, userAgent: req.headers['user-agent'],
+      success: true
+    });
 
-      res.json({
-        message: `✅ ${credits} credits given to ${user.username}. They are now Pro.`,
-        resellerCreditsLeft: resellerNewCredits,
-        userNewCredits: userNewCredits,
-      });
-    } catch (updateErr) {
-      console.error('❌ Credit update error:', updateErr);
-
-      await createAuditLog({
-        actorType: 'reseller',
-        actorId: reseller._id,
-        action: 'GIVE_CREDITS',
-        targetId: user._id,
-        targetType: 'user',
-        ip: req.ip,
-        userAgent: req.headers['user-agent'],
-        success: false,
-        error: updateErr.message
-      });
-
-      throw updateErr;
-    }
+    res.json({
+      message: `✅ ${plan.label} plan (${credits} credits) given to ${user.username}. They are now Pro.`,
+      plan: plan.label,
+      creditsGiven: credits,
+      resellerCreditsLeft: resellerNewCredits,
+      userNewCredits,
+    });
   } catch (err) {
     console.error('❌ Give credits error:', err);
     res.status(500).json({ message: 'Server error' });
