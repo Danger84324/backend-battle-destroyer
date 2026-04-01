@@ -118,245 +118,98 @@ router.post('/attack', auth, async (req, res) => {
 
         const { ip, port, duration, captchaToken } = req.body;
 
-        // Required fields
-        if (!ip || !port || !duration) {
+        if (!ip || !port || !duration)
             return res.status(400).json({ message: 'IP, port, and duration are required' });
-        }
-
 
         const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip;
         const captchaResult = await verifyTurnstile(captchaToken, clientIp);
-        if (!captchaResult.success) {
-            return res.status(403).json({
-                message: 'Captcha verification failed. Please try again.',
-                errors: captchaResult['error-codes']
-            });
-        }
+        if (!captchaResult.success)
+            return res.status(403).json({ message: 'Captcha verification failed. Please try again.' });
 
-        // IP validation
         const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
-        if (!ipRegex.test(ip)) {
+        if (!ipRegex.test(ip))
             return res.status(400).json({ message: 'Invalid IP address format' });
-        }
 
-        // Port validation
         const portNum = parseInt(port);
-        if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+        if (isNaN(portNum) || portNum < 1 || portNum > 65535)
             return res.status(400).json({ message: 'Port must be between 1 and 65535' });
-        }
 
-        // Blocked ports
-        if (BLOCKED_PORTS.has(portNum)) {
-            return res.status(400).json({
-                message: `Port ${portNum} is blocked and cannot be used.`
-            });
-        }
+        if (BLOCKED_PORTS.has(portNum))
+            return res.status(400).json({ message: `Port ${portNum} is blocked.` });
 
-        // Duration validation
         const durNum = parseInt(duration);
         const MAX_DURATION = user.isPro ? 300 : 60;
 
-        if (isNaN(durNum) || durNum < 1) {
+        if (isNaN(durNum) || durNum < 1)
             return res.status(400).json({ message: 'Duration must be at least 1 second' });
-        }
 
-        if (durNum > MAX_DURATION) {
+        if (durNum > MAX_DURATION)
             return res.status(403).json({
                 message: user.isPro
                     ? 'Duration cannot exceed 300 seconds'
-                    : 'Free accounts are limited to 60 seconds. Upgrade to Pro for up to 300 seconds.',
+                    : 'Free accounts limited to 60s. Upgrade to Pro for 300s.',
                 maxDuration: MAX_DURATION,
                 isPro: user.isPro,
             });
-        }
 
-        // Credit check
-        if (user.credits < 1) {
-            return res.status(403).json({
-                message: 'Insufficient credits. Share your referral link to earn more.',
-                credits: user.credits,
-            });
-        }
+        if (user.credits < 1)
+            return res.status(403).json({ message: 'Insufficient credits.', credits: user.credits });
 
-        // Concurrent attack check
-        if (activeAttacks.has(user._id.toString())) {
-            return res.status(400).json({
-                message: 'You already have an attack running. Please stop it first.'
-            });
-        }
+        if (activeAttacks.has(user._id.toString()))
+            return res.status(400).json({ message: 'You already have an attack running.' });
 
-        // 🔥 CALL YOUR EC2 API
-        const apiStartTime = Date.now();
-        
-        console.log('[DEBUG] 🚀 Starting external API call...', {
-            timestamp: new Date().toISOString(),
-            userId: user._id,
-            username: user.username,
-            targetIp: ip,
-            targetPort: portNum,
-            duration: durNum,
-            apiUrl: process.env.API_URL,
-            clientIp: clientIp
-        });
-
+        // 🔥 Call external API
         const response = await axios.post(
             process.env.API_URL,
+            { param1: ip, param2: portNum, param3: durNum },
             {
-                param1: ip,
-                param2: portNum,
-                param3: durNum
-            },
-            {
-                headers: {
-                    "Content-Type": "application/json",
-                    "x-api-key": process.env.API_KEY
-                },
+                headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.API_KEY },
                 timeout: 15000,
                 validateStatus: () => true
             }
         );
 
-        const apiResponseTime = Date.now() - apiStartTime;
+        console.log(`[ATTACK] ${user.username} → ${ip}:${portNum} ${durNum}s | API: ${response.status}`);
 
-        // Log FULL external API response (for debugging only - NOT sent to frontend)
-        console.log('[EXTERNAL API RESPONSE] ✅ Response received', {
-            timestamp: new Date().toISOString(),
-            userId: user._id,
-            username: user.username,
-            status: response.status,
-            statusText: response.statusText,
-            responseTimeMs: apiResponseTime,
-            headers: response.headers,
-            data: response.data,
-            config: {
-                url: response.config?.url,
-                method: response.config?.method,
-                timeout: response.config?.timeout
-            }
-        });
-
-        // If external API failed
         if (response.status !== 200 || response.data?.error) {
-
-            console.error('[ERROR] ❌ External API failed', {
-                timestamp: new Date().toISOString(),
-                userId: user._id,
-                username: user.username,
-                targetIp: ip,
-                targetPort: portNum,
-                status: response.status,
-                statusText: response.statusText,
-                errorMessage: response.data?.error,
-                errorCode: response.data?.code,
-                fullResponse: response.data,
-                responseTimeMs: apiResponseTime
-            });
-
-            if (response.data?.error?.includes("Max concurrent")) {
-                console.warn('[WARN] ⚠️  Max concurrent attacks reached', {
-                    timestamp: new Date().toISOString(),
-                    userId: user._id,
-                    username: user.username,
-                    currentAttacks: activeAttacks.size
-                });
+            if (response.data?.error?.includes('Max concurrent')) {
                 return res.status(429).json({
-                    message: "Server is busy. Too many attacks running. Please wait 5 seconds and try again.",
+                    message: 'Server busy. Please wait 5 seconds and try again.',
                     cooldown: 5
                 });
             }
-
             return res.status(response.status || 400).json({
-                message: response.data?.error || "Failed to start attack"
-                // ✅ NOT sending external response details to frontend
+                message: response.data?.error || 'Failed to start attack'
             });
         }
 
-        console.log('[SUCCESS] ✅ External API accepted attack', {
-            timestamp: new Date().toISOString(),
-            userId: user._id,
-            username: user.username,
-            targetIp: ip,
-            targetPort: portNum,
-            duration: durNum,
-            status: response.status,
-            responseTimeMs: apiResponseTime,
-            responseData: response.data
-        });
-
-        // Register attack
         const startedAt = new Date().toISOString();
 
-        activeAttacks.set(user._id.toString(), {
-            ip,
-            port: portNum,
-            duration: durNum,
-            startedAt
-        });
+        activeAttacks.set(user._id.toString(), { ip, port: portNum, duration: durNum, startedAt });
 
-        console.log('[INFO] 📝 Attack registered in memory', {
-            timestamp: new Date().toISOString(),
-            userId: user._id,
-            username: user.username,
-            totalActiveAttacks: activeAttacks.size,
-            startedAt: startedAt
-        });
-
-        // Auto clear
         setTimeout(() => {
             activeAttacks.delete(user._id.toString());
-            console.log('[INFO] 🗑️  Attack auto-cleared from memory', {
-                timestamp: new Date().toISOString(),
-                userId: user._id,
-                username: user.username,
-                totalActiveAttacks: activeAttacks.size
-            });
         }, durNum * 1000 + 5000);
 
-        // Deduct credit
         const updated = await User.findByIdAndUpdate(
             user._id,
             { $inc: { credits: -1 } },
             { new: true }
         );
 
-        console.log('[INFO] 💳 Credit deducted', {
-            timestamp: new Date().toISOString(),
-            userId: user._id,
-            username: user.username,
-            creditsRemaining: updated.credits,
-            creditDeducted: 1
-        });
+        await Stats.findByIdAndUpdate('global', { $inc: { totalAttacks: 1 } }, { upsert: true });
 
-        await Stats.findByIdAndUpdate(
-            'global',
-            { $inc: { totalAttacks: 1 } },
-            { upsert: true }
-        );
-
-        console.log('[SUCCESS] 🎯 Attack launched by ' + user.username + ' → ' + ip + ':' + portNum + ' for ' + durNum + 's');
+        console.log(`[SUCCESS] Attack launched: ${user.username} | Credits left: ${updated.credits}`);
 
         return res.json({
             message: 'Attack launched successfully',
-            attack: {
-                ip,
-                port: portNum,
-                duration: durNum,
-                startedAt
-                // ✅ Removed externalResponse to keep frontend clean
-            },
+            attack: { ip, port: portNum, duration: durNum, startedAt },
             credits: updated.credits,
             isPro: user.isPro,
         });
 
     } catch (err) {
-        console.error('[ERROR] 💥 Unexpected error in attack route', {
-            timestamp: new Date().toISOString(),
-            error: err.message,
-            stack: err.stack,
-            userId: req.user?.id,
-            ip: req.body?.ip,
-            port: req.body?.port
-        });
+        console.error(`[ERROR] Attack route: ${err.message}`);
         res.status(500).json({ message: 'Server error. Please try again.' });
     }
 });
