@@ -122,12 +122,13 @@ const globalLimiter = rateLimit({
   message: { message: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  // AFTER
   skip: (req) => {
-    // Skip rate limit in dev
     if (process.env.NODE_ENV !== 'production') return true;
-    // Skip for non-critical endpoints (health checks, CSRF token, stats)
     if (req.path === '/' || req.path === '/api/bgmi/health' || req.path === '/api/csrf-token') return true;
     if (req.path === '/panel/stats') return true;
+    if (req.path.includes('/me')) return true;            // ← ADD
+    if (req.path.includes('/attack-status')) return true; // ← ADD
     return false;
   },
 });
