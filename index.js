@@ -59,6 +59,8 @@ const allowedOrigins = [
   'https://battle-destroyer.shop',
   'https://www.battle-destroyer.shop',
   'http://localhost:3000',
+  'https://backend-battle-destroyer-production.up.railway.app',
+  'https://api.battle-destroyer.shop',
 ];
 
 app.use(cors({

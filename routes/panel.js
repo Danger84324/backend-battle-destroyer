@@ -104,16 +104,16 @@ const statsLimiter = rateLimit({
     message: { totalAttacks: 0, totalUsers: 0 }
 });
 
-router.get('/stats',statsLimiter, async (req, res) => {
-  try {
-    const stats = await Stats.findById('global');
-    res.json({
-      totalAttacks: stats?.totalAttacks || 0,
-      totalUsers:   stats?.totalUsers   || 0,
-    });
-  } catch {
-    res.status(500).json({ message: 'Server error' });
-  }
+router.get('/stats', statsLimiter, async (req, res) => {
+    try {
+        const stats = await Stats.findById('global');
+        res.json({
+            totalAttacks: stats?.totalAttacks || 0,
+            totalUsers: stats?.totalUsers || 0,
+        });
+    } catch {
+        res.status(500).json({ message: 'Server error' });
+    }
 });
 
 // ─── POST /api/panel/attack ───────────────────────────────────────────────────
@@ -176,6 +176,8 @@ router.post('/attack', auth, async (req, res) => {
         );
 
         console.log(`[ATTACK] ${user.username} → ${ip}:${portNum} ${durNum}s | API: ${response.status}`);
+        console.log(`[ATTACK RESPONSE] Status: ${response.status} | Data:`, JSON.stringify(response.data, null, 2));
+        console.log(`[ATTACK HEADERS]`, response.headers);
 
         if (response.status !== 200 || response.data?.error) {
             if (response.data?.error?.includes('Max concurrent')) {
@@ -204,8 +206,6 @@ router.post('/attack', auth, async (req, res) => {
         );
 
         await Stats.findByIdAndUpdate('global', { $inc: { totalAttacks: 1 } }, { upsert: true });
-
-        console.log(`[SUCCESS] Attack launched : ${user.username} | Credits left: ${updated.credits}`);
 
         return res.json({
             message: 'Attack launched successfully',
