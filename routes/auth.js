@@ -1,3 +1,4 @@
+// routes/auth.js (Updated version)
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
@@ -6,8 +7,7 @@ const axios = require('axios');
 const User = require('../models/User');
 const Stats = require('../models/Stats');
 
-// ─── TOKEN BLACKLIST ──────────────────────────────────────────────────────────
-// In production replace with Redis for persistence across restarts/instances.
+// Token blacklist
 const usedCaptchaTokens = new Map();
 
 function blacklistToken(token) {
@@ -24,13 +24,13 @@ function isTokenBlacklisted(token) {
   return true;
 }
 
-// ─── TURNSTILE VERIFICATION ───────────────────────────────────────────────────
+// Turnstile verification
 async function verifyTurnstile(token, ip) {
   if (!token || token.length < 10) {
     return { success: false, 'error-codes': ['missing-input-response'] };
   }
   if (isTokenBlacklisted(token)) {
-    console.warn('⚠️  Replay attempt — token already used:', token.slice(0, 20) + '…');
+    console.warn('⚠️ Replay attempt — token already used');
     return { success: false, 'error-codes': ['duplicate-use'] };
   }
   try {
@@ -47,7 +47,6 @@ async function verifyTurnstile(token, ip) {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
     if (data.success) blacklistToken(token);
-    else console.warn('❌ Turnstile rejected:', data['error-codes']);
     return data;
   } catch (err) {
     console.error('❌ Turnstile request failed:', err.message);
@@ -55,7 +54,7 @@ async function verifyTurnstile(token, ip) {
   }
 }
 
-// ─── PASSWORD VALIDATION ──────────────────────────────────────────────────────
+// Password validation
 function validatePassword(password) {
   const errors = [];
   if (!password || password.length < 8) errors.push('Min 8 characters');
@@ -65,63 +64,58 @@ function validatePassword(password) {
   return errors;
 }
 
-// ─── SIGNUP  POST /api/auth/signup ────────────────────────────────────────────
-// ─── SIGNUP  POST /api/auth/signup ────────────────────────────────────────────
+// SIGNUP - New users get 10 free credits, referral gives +2 bonus
 router.post('/signup', async (req, res) => {
   try {
     const { username, email, password, captchaToken, fingerprint, referralCode } = req.body;
 
-    // ── Get real IP (works on Render, VPS, localhost) ──
-    const rawIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-      || req.ip
-      || '';
+    // Get real IP
+    const rawIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || '';
     let ip = rawIp;
     if (ip.startsWith('::ffff:')) ip = ip.slice(7);
     if (ip === '::1') ip = '127.0.0.1';
 
-    // Internal/shared IPs (Render internal network, localhost) — skip IP abuse check
     const isInternalIp = ip.startsWith('10.') ||
       ip.startsWith('172.16.') ||
       ip.startsWith('192.168.') ||
       ip === '127.0.0.1';
 
-    // ── Required fields ──
+    // Required fields
     if (!username || !email || !password || !captchaToken) {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
-    // ── CAPTCHA ──
+    // CAPTCHA
     const captcha = await verifyTurnstile(captchaToken, ip);
     if (!captcha.success) {
       return res.status(400).json({
         message: captcha['error-codes']?.includes('duplicate-use')
           ? 'CAPTCHA already used. Please solve it again.'
           : 'CAPTCHA verification failed. Please try again.',
-        codes: captcha['error-codes'],
       });
     }
 
-    // ── Password strength ──
+    // Password strength
     const pwErrors = validatePassword(password);
     if (pwErrors.length) return res.status(400).json({ message: pwErrors[0] });
 
-    // ── Username format ──
+    // Username format
     if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
       return res.status(400).json({ message: 'Username must be 3–20 alphanumeric characters' });
     }
 
-    // ── Duplicate check ──
+    // Duplicate check
     const exists = await User.findOne({ $or: [{ email }, { username }] });
     if (exists) return res.status(400).json({ message: 'Email or username already taken' });
 
-    // ── Referral code check ──
+    // Referral code check
     let referrer = null;
     if (referralCode) {
       referrer = await User.findOne({ referralCode: referralCode.trim() });
       if (!referrer) return res.status(400).json({ message: 'Invalid referral code' });
     }
 
-    // ── Abuse check (fingerprint only on internal IPs) ──
+    // Abuse check
     const abuseOrClauses = [];
     if (!isInternalIp && ip) abuseOrClauses.push({ ipAddress: ip });
     if (fingerprint) abuseOrClauses.push({ fingerprint });
@@ -136,11 +130,13 @@ router.post('/signup', async (req, res) => {
     }
 
     const isNewUniqueUser = !abuseCheck;
-    const startingCredits = isNewUniqueUser ? 3 : 0;
+    
+    // NEW: Start with 10 free credits
+    const startingCredits = isNewUniqueUser ? 10 : 0;
 
     console.log(`[Signup] ${username} | IP: ${ip} | internal: ${isInternalIp} | abuse: ${!!abuseCheck} | credits: ${startingCredits}`);
 
-    // ── Create user ──
+    // Create user with new subscription structure
     const hashed = await bcrypt.hash(password, 12);
     const user = new User({
       username,
@@ -151,19 +147,25 @@ router.post('/signup', async (req, res) => {
       fingerprint: fingerprint || null,
       creditGiven: isNewUniqueUser,
       referredBy: referrer ? referrer.referralCode : null,
+      subscription: {
+        type: 'free',
+        plan: 'none',
+        dailyCredits: 10,
+        lastCreditReset: new Date()
+      }
     });
 
     await user.save();
 
-    // ── Reward both sides of referral ──
+    // Reward referral (both sides get +2 bonus)
     if (referrer && isNewUniqueUser) {
-      // Referrer gets +2
+      // Referrer gets +2 credits
       await User.findByIdAndUpdate(referrer._id, {
         $inc: { credits: 2, referralCount: 1 }
       });
       console.log(`[Referral] ${referrer.username} +2 credits for referring ${username}`);
 
-      // New user also gets +2 bonus
+      // New user also gets +2 bonus credits
       await User.findByIdAndUpdate(user._id, {
         $inc: { credits: 2 }
       });
@@ -171,14 +173,14 @@ router.post('/signup', async (req, res) => {
       console.log(`[Referral] ${username} +2 bonus credits for using referral`);
     }
 
-    // ── JWT ──
+    // JWT
     const token = jwt.sign(
       { id: user._id, userId: user.userId },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    // ── Global stats ──
+    // Global stats
     await Stats.findByIdAndUpdate(
       'global',
       { $inc: { totalUsers: 1 } },
@@ -186,7 +188,7 @@ router.post('/signup', async (req, res) => {
     );
 
     return res.status(201).json({
-      message: 'Account created successfully!',
+      message: 'Account created successfully! You received 10 free credits!',
       token,
       user: {
         userId: user.userId,
@@ -195,7 +197,10 @@ router.post('/signup', async (req, res) => {
         credits: user.credits,
         referralCode: user.referralCode,
         referralCount: user.referralCount,
-        isPro: user.isPro,
+        isPro: user.isProUser(),
+        subscription: user.subscription,
+        remainingAttacks: await user.getRemainingAttacks(),
+        maxDuration: user.getMaxDuration()
       },
     });
 
@@ -209,7 +214,7 @@ router.post('/signup', async (req, res) => {
   }
 });
 
-// ─── LOGIN  POST /api/auth/login ──────────────────────────────────────────────
+// LOGIN
 router.post('/login', async (req, res) => {
   try {
     const { email, password, captchaToken } = req.body;
@@ -225,7 +230,6 @@ router.post('/login', async (req, res) => {
         message: captcha['error-codes']?.includes('duplicate-use')
           ? 'CAPTCHA already used. Please solve it again.'
           : 'CAPTCHA verification failed. Please try again.',
-        codes: captcha['error-codes'],
       });
     }
 
@@ -235,6 +239,9 @@ router.post('/login', async (req, res) => {
 
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(400).json(credError);
+
+    // Check and reset daily credits on login
+    await user.checkAndResetDailyCredits();
 
     const token = jwt.sign(
       { id: user._id, userId: user.userId },
@@ -251,7 +258,11 @@ router.post('/login', async (req, res) => {
         credits: user.credits,
         referralCode: user.referralCode,
         referralCount: user.referralCount,
-        isPro: user.isPro,
+        isPro: user.isProUser(),
+        subscription: user.subscription,
+        remainingAttacks: await user.getRemainingAttacks(),
+        maxDuration: user.getMaxDuration(),
+        totalAttacks: user.totalAttacks
       },
     });
 

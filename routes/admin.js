@@ -1,3 +1,4 @@
+// routes/admin.js (Updated version with subscription management)
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
@@ -7,6 +8,7 @@ const Reseller = require('../models/Reseller');
 const AuditLog = require('../models/AuditLog');
 const validation = require('../utils/validation');
 const { createAuditLog } = require('../utils/audit');
+const dailyResetService = require('../services/dailyResetService');
 
 // ===== REDIS SESSION STORE =====
 const redis = require('redis');
@@ -16,6 +18,80 @@ const redisClient = redis.createClient({
     reconnectStrategy: (retries) => Math.min(retries * 100, 3000)
   }
 });
+
+
+router.post('/trigger-daily-reset', adminAuth, async (req, res) => {
+    try {
+        // Optional: Add a secret for extra security
+        const { secret } = req.body;
+        if (process.env.NODE_ENV === 'production' && secret !== process.env.ADMIN_RESET_SECRET) {
+            return res.status(403).json({ message: 'Unauthorized: Invalid reset secret' });
+        }
+        
+        const result = await dailyResetService.manualReset();
+        
+        if (result.success) {
+            await createAuditLog({
+                actorType: 'admin',
+                actorId: req.adminSession?.token,
+                action: 'DAILY_RESET',
+                targetType: 'system',
+                changes: result,
+                ip: req.ip,
+                userAgent: req.headers['user-agent'],
+                success: true
+            });
+            
+            res.json({
+                message: 'Daily reset triggered successfully',
+                result
+            });
+        } else {
+            res.status(500).json({
+                message: 'Daily reset failed',
+                error: result.error
+            });
+        }
+    } catch (err) {
+        console.error('❌ Manual reset error:', err);
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'DAILY_RESET_FAILED',
+            success: false,
+            error: err.message,
+            ip: req.ip,
+            userAgent: req.headers['user-agent']
+        });
+        res.status(500).json({ message: 'Failed to trigger reset' });
+    }
+});
+
+// Get daily reset status (admin)
+router.get('/daily-reset-status', adminAuth, async (req, res) => {
+    try {
+        const lastReset = await AuditLog.findOne({ 
+            action: 'DAILY_RESET', 
+            success: true 
+        }).sort({ createdAt: -1 });
+        
+        const status = dailyResetService.getStatus();
+        
+        res.json({
+            ...status,
+            lastReset: lastReset ? {
+                timestamp: lastReset.createdAt,
+                usersReset: lastReset.changes?.usersReset,
+                proUsersReset: lastReset.changes?.proUsersReset,
+                freeUsersReset: lastReset.changes?.freeUsersReset
+            } : null,
+            manualResetEnabled: !!process.env.ADMIN_RESET_SECRET
+        });
+    } catch (err) {
+        console.error('❌ Reset status error:', err);
+        res.status(500).json({ message: 'Failed to get reset status' });
+    }
+});
+
 
 redisClient.on('error', (err) => {
     console.error('❌ Redis Error:', err);
@@ -234,27 +310,38 @@ async function adminAuth(req, res, next) {
 }
 
 // ═══════════════════════════════════════════════
-//  STATS ROUTE
+//  STATS ROUTE (UPDATED with subscription stats)
 // ═══════════════════════════════════════════════
 
 router.get('/stats', adminAuth, async (req, res) => {
     try {
-        const [total, pro, withCredits, today, totalResellers, activeResellers] = await Promise.all([
+        const [total, proUsers, freeUsers, withCredits, today, totalResellers, activeResellers] = await Promise.all([
             User.countDocuments(),
-            User.countDocuments({ isPro: true }),
+            User.countDocuments({ 'subscription.type': 'pro', 'subscription.expiresAt': { $gt: new Date() } }),
+            User.countDocuments({ 'subscription.type': 'free' }),
             User.countDocuments({ credits: { $gt: 0 } }),
             User.countDocuments({ createdAt: { $gte: new Date(Date.now() - 86400000) } }),
             Reseller.countDocuments(),
             Reseller.countDocuments({ isBlocked: false }),
         ]);
 
+        // Get total attacks today
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const attacksToday = await User.aggregate([
+            { $match: { 'dailyAttacks.date': { $gte: todayStart } } },
+            { $group: { _id: null, total: { $sum: '$dailyAttacks.count' } } }
+        ]);
+
         res.json({
             total,
-            pro,
+            pro: proUsers,
+            free: freeUsers,
             withCredits,
             today,
             totalResellers,
-            activeResellers
+            activeResellers,
+            attacksToday: attacksToday[0]?.total || 0
         });
     } catch (err) {
         console.error('❌ Stats error:', err);
@@ -263,7 +350,7 @@ router.get('/stats', adminAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════
-//  USER ROUTES - FIXED WITH FILTERS & PAGINATION
+//  USER ROUTES (UPDATED with subscription data)
 // ═══════════════════════════════════════════════
 
 /**
@@ -272,29 +359,20 @@ router.get('/stats', adminAuth, async (req, res) => {
  * - page (number): Page number, default 1
  * - limit (number): Items per page, default 50 (max 100)
  * - search (string): Search in username, email, userId
- * - isPro (string): Filter by "true" or "false"
+ * - subscriptionType (string): Filter by "pro" or "free"
  * 
- * Response:
- * {
- *   "users": [...],
- *   "total": 250,
- *   "totalPages": 5,
- *   "currentPage": 1
- * }
+ * Response includes subscription details
  */
 router.get('/users', adminAuth, async (req, res) => {
     try {
-        // Parse and validate query parameters
         let page = parseInt(req.query.page) || 1;
         let limit = parseInt(req.query.limit) || 50;
         const search = req.query.search ? String(req.query.search).trim() : '';
-        const isPro = req.query.isPro; // Can be "true", "false", or undefined
+        const subscriptionType = req.query.subscriptionType; // "pro" or "free"
 
-        // Validate pagination
         if (page < 1) page = 1;
         if (limit < 1 || limit > 100) limit = 50;
 
-        // Build filter query
         const query = {};
 
         // Add search filter
@@ -306,30 +384,48 @@ router.get('/users', adminAuth, async (req, res) => {
             ];
         }
 
-        // Add isPro filter
-        if (isPro !== undefined) {
-            query.isPro = isPro === 'true'; // Convert string to boolean
+        // Add subscription type filter
+        if (subscriptionType === 'pro') {
+            query['subscription.type'] = 'pro';
+            query['subscription.expiresAt'] = { $gt: new Date() };
+        } else if (subscriptionType === 'free') {
+            query.$or = [
+                { 'subscription.type': 'free' },
+                { 'subscription.expiresAt': { $lte: new Date() } }
+            ];
         }
 
-        // Count total matching documents
         const total = await User.countDocuments(query);
         const totalPages = Math.ceil(total / limit);
 
-        // Ensure page is within valid range
         if (page > totalPages && totalPages > 0) {
             page = totalPages;
         }
 
-        // Fetch users with pagination
         const users = await User.find(query)
-            .select('-password') // Exclude password field
+            .select('-password')
             .sort({ createdAt: -1 })
             .skip((page - 1) * limit)
             .limit(limit)
-            .lean(); // Return plain objects (faster)
+            .lean();
+
+        // Add computed fields to each user
+        const usersWithStatus = users.map(user => ({
+            ...user,
+            isPro: user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date(),
+            subscriptionStatus: {
+                active: user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date(),
+                daysLeft: user.subscription?.expiresAt 
+                    ? Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))
+                    : 0,
+                plan: user.subscription?.plan || 'none',
+                expiresAt: user.subscription?.expiresAt
+            },
+            remainingAttacks: user.isProUser ? user.subscription?.dailyCredits : user.credits
+        }));
 
         res.json({
-            users,
+            users: usersWithStatus,
             total,
             totalPages,
             currentPage: page
@@ -352,6 +448,18 @@ router.get('/users/:id', adminAuth, async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
+        // Add computed fields
+        user.isPro = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
+        user.subscriptionStatus = {
+            active: user.isPro,
+            daysLeft: user.subscription?.expiresAt 
+                ? Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))
+                : 0,
+            plan: user.subscription?.plan || 'none',
+            expiresAt: user.subscription?.expiresAt
+        };
+        user.remainingAttacks = user.isPro ? user.subscription?.dailyCredits : user.credits;
+
         res.json(user);
     } catch (err) {
         console.error('❌ Get user error:', err);
@@ -359,13 +467,557 @@ router.get('/users/:id', adminAuth, async (req, res) => {
     }
 });
 
+// Add to admin.js routes
+
+// Remove Pro subscription from user
+// Remove Pro subscription from user
+router.delete('/users/:id/remove-pro', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const user = await User.findById(req.params.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const oldSubscription = user.subscription ? { ...user.subscription.toObject?.() || user.subscription } : null;
+        
+        // Reset to free tier
+        user.subscription.type = 'free';
+        user.subscription.plan = 'none';
+        user.subscription.expiresAt = null;
+        user.subscription.dailyCredits = 10;
+        user.subscription.lastCreditReset = new Date();
+        user.isPro = false;
+        
+        // Give free user some credits (optional)
+        if (user.credits === 0) {
+            user.credits = 10;
+        }
+        
+        await user.save();
+
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'REMOVE_PRO_SUBSCRIPTION',
+            targetId: user._id,
+            targetType: 'user',
+            changes: { oldSubscription, newSubscription: user.subscription },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({ 
+            message: 'Pro subscription removed', 
+            user: { 
+                id: user._id, 
+                username: user.username,
+                email: user.email,
+                isPro: false,
+                subscription: user.subscription,
+                credits: user.credits
+            } 
+        });
+    } catch (err) {
+        console.error('❌ Remove pro error:', err);
+        console.error('Error details:', err.message);
+        res.status(500).json({ 
+            message: 'Failed to remove pro subscription',
+            error: err.message 
+        });
+    }
+});
+
+// Extend Pro subscription (add days)
+router.post('/users/:id/extend-pro', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const { planType, customDays } = req.body;
+        const user = await User.findById(req.params.id);
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Check if user has Pro subscription
+        if (!user.isProUser()) {
+            return res.status(400).json({ message: 'User does not have an active Pro subscription' });
+        }
+
+        let days = 0;
+        if (planType === 'custom' && customDays) {
+            days = parseInt(customDays);
+        } else {
+            const planDays = { week: 7, month: 30, season: 90 };
+            days = planDays[planType];
+            if (!days) {
+                return res.status(400).json({ message: 'Invalid plan type' });
+            }
+        }
+
+        if (isNaN(days) || days < 1 || days > 365) {
+            return res.status(400).json({ message: 'Days must be between 1 and 365' });
+        }
+
+        const oldExpiry = user.subscription.expiresAt;
+        
+        // Extend expiry date
+        const newExpiry = new Date(user.subscription.expiresAt);
+        newExpiry.setDate(newExpiry.getDate() + days);
+        user.subscription.expiresAt = newExpiry;
+        await user.save();
+
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'EXTEND_PRO_SUBSCRIPTION',
+            targetId: user._id,
+            targetType: 'user',
+            changes: { days, oldExpiry, newExpiry: user.subscription.expiresAt },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: `Pro subscription extended by ${days} days`,
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                isPro: user.isProUser(),
+                subscription: user.subscription,
+                expiresAt: user.subscription.expiresAt,
+                daysLeft: user.getSubscriptionStatus().daysLeft
+            }
+        });
+    } catch (err) {
+        console.error('❌ Extend pro error:', err);
+        console.error('Error details:', err.message);
+        res.status(500).json({ 
+            message: 'Failed to extend pro subscription',
+            error: err.message 
+        });
+    }
+});
+
+// Helper: Get user with computed subscription status
+router.get('/users/:id/status', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const user = await User.findById(req.params.id).select('-password');
+        
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const isPro = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
+        
+        res.json({
+            id: user._id,
+            username: user.username,
+            email: user.email,
+            isPro: isPro,
+            subscription: user.subscription,
+            credits: user.credits,
+            totalAttacks: user.totalAttacks || 0,
+            createdAt: user.createdAt,
+            subscriptionStatus: isPro ? {
+                active: true,
+                plan: user.subscription.plan,
+                daysLeft: Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24)),
+                expiresAt: user.subscription.expiresAt,
+                dailyCredits: user.subscription.dailyCredits
+            } : {
+                active: false,
+                plan: 'free',
+                daysLeft: 0,
+                expiresAt: null,
+                dailyCredits: 10
+            }
+        });
+    } catch (err) {
+        console.error('❌ Get user status error:', err);
+        res.status(500).json({ message: 'Failed to get user status' });
+    }
+});
+
+// Replace Pro subscription (set new plan regardless of current expiry)
+router.post('/users/:id/replace-pro', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const { planType, customDays } = req.body;
+        const user = await User.findById(req.params.id);
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        let days = 0;
+        let plan = planType;
+
+        // Calculate days based on plan type
+        if (planType === 'custom' && customDays) {
+            days = parseInt(customDays);
+            plan = 'custom';
+        } else {
+            // Support both standard and custom days for season
+            const planDays = { 
+                week: 7, 
+                month: 30,
+                season: 90
+            };
+            
+            // If planType is 'season' but we want 60 days, use custom
+            if (planType === 'season' && customDays === 60) {
+                days = 60;
+                plan = 'custom';
+            } else {
+                days = planDays[planType];
+                if (!days) {
+                    return res.status(400).json({ 
+                        message: 'Invalid plan type. Use: week, month, season, or custom',
+                        validPlans: ['week', 'month', 'season', 'custom']
+                    });
+                }
+            }
+        }
+
+        // Validate days
+        if (isNaN(days) || days < 1 || days > 365) {
+            return res.status(400).json({ 
+                message: 'Days must be between 1 and 365',
+                provided: days
+            });
+        }
+
+        const oldSubscription = user.subscription ? { 
+            type: user.subscription.type,
+            plan: user.subscription.plan,
+            expiresAt: user.subscription.expiresAt,
+            dailyCredits: user.subscription.dailyCredits
+        } : null;
+        
+        // Store old expiry for audit
+        const oldExpiry = user.subscription?.expiresAt;
+        
+        // Reset subscription to free first (ensures clean state)
+        user.subscription.type = 'free';
+        user.subscription.plan = 'none';
+        user.subscription.expiresAt = null;
+        user.subscription.dailyCredits = 10;
+        user.subscription.lastCreditReset = new Date();
+        
+        // Now add new Pro subscription using the model method
+        user.addProSubscription(plan, days);
+        await user.save();
+
+        // Log the action
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'REPLACE_PRO_SUBSCRIPTION',
+            targetId: user._id,
+            targetType: 'user',
+            changes: { 
+                oldSubscription, 
+                newSubscription: {
+                    type: user.subscription.type,
+                    plan: user.subscription.plan,
+                    expiresAt: user.subscription.expiresAt,
+                    dailyCredits: user.subscription.dailyCredits
+                },
+                days,
+                plan,
+                oldExpiry,
+                newExpiry: user.subscription.expiresAt
+            },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: `Pro subscription replaced with ${days} days plan`,
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                isPro: user.isProUser(),
+                subscription: {
+                    type: user.subscription.type,
+                    plan: user.subscription.plan,
+                    expiresAt: user.subscription.expiresAt,
+                    dailyCredits: user.subscription.dailyCredits
+                },
+                expiresAt: user.subscription.expiresAt,
+                daysLeft: user.getSubscriptionStatus().daysLeft
+            }
+        });
+    } catch (err) {
+        console.error('❌ Replace pro error:', err);
+        console.error('Error details:', err.message);
+        console.error('Stack:', err.stack);
+        res.status(500).json({ 
+            message: 'Failed to replace pro subscription',
+            error: err.message,
+            details: err.stack
+        });
+    }
+});
+
+// NEW: Give Pro Subscription to User
+router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const { planType, customDays } = req.body;
+        const user = await User.findById(req.params.id);
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        let days = 0;
+        let plan = planType;
+
+        if (planType === 'custom' && customDays) {
+            days = parseInt(customDays);
+            plan = 'custom';
+        } else {
+            const planDays = {
+                week: 7,
+                month: 30,
+                season: 90
+            };
+            days = planDays[planType];
+            if (!days) {
+                return res.status(400).json({ 
+                    message: 'Invalid plan type',
+                    validPlans: ['week', 'month', 'season', 'custom']
+                });
+            }
+        }
+
+        if (isNaN(days) || days < 1 || days > 365) {
+            return res.status(400).json({ 
+                message: 'Days must be between 1 and 365',
+                provided: days
+            });
+        }
+
+        const oldSubscription = user.subscription ? { 
+            type: user.subscription.type,
+            plan: user.subscription.plan,
+            expiresAt: user.subscription.expiresAt,
+            dailyCredits: user.subscription.dailyCredits
+        } : null;
+        
+        // Use the model method to add subscription
+        user.addProSubscription(plan, days);
+        await user.save();
+
+        // Log the action
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'GIVE_PRO_SUBSCRIPTION',
+            targetId: user._id,
+            targetType: 'user',
+            changes: {
+                plan,
+                days,
+                oldSubscription,
+                newSubscription: {
+                    type: user.subscription.type,
+                    plan: user.subscription.plan,
+                    expiresAt: user.subscription.expiresAt,
+                    dailyCredits: user.subscription.dailyCredits
+                }
+            },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: `Pro subscription added successfully for ${days} days`,
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                isPro: user.isProUser(),
+                subscription: {
+                    type: user.subscription.type,
+                    plan: user.subscription.plan,
+                    expiresAt: user.subscription.expiresAt,
+                    dailyCredits: user.subscription.dailyCredits
+                },
+                expiresAt: user.subscription.expiresAt,
+                daysLeft: user.getSubscriptionStatus().daysLeft
+            }
+        });
+    } catch (err) {
+        console.error('❌ Give pro error:', err);
+        console.error('Error details:', err.message);
+        console.error('Stack:', err.stack);
+        res.status(500).json({ 
+            message: 'Failed to give pro subscription',
+            error: err.message 
+        });
+    }
+});
+
+// NEW: Add credits to user (for free users)
+router.post('/users/:id/add-credits', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const { amount } = req.body;
+        if (!amount || amount < 1 || amount > 10000) {
+            return res.status(400).json({ message: 'Amount must be between 1 and 10000' });
+        }
+
+        const user = await User.findById(req.params.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const oldCredits = user.credits;
+        user.credits += amount;
+        await user.save();
+
+        // Log the action
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'ADD_CREDITS',
+            targetId: user._id,
+            targetType: 'user',
+            changes: { old: oldCredits, new: user.credits, added: amount },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: `Added ${amount} credits to ${user.username}`,
+            credits: user.credits
+        });
+    } catch (err) {
+        console.error('❌ Add credits error:', err);
+        res.status(500).json({ message: 'Failed to add credits' });
+    }
+});
+
+// NEW: Remove credits from user
+router.post('/users/:id/remove-credits', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const { amount } = req.body;
+        if (!amount || amount < 1 || amount > 10000) {
+            return res.status(400).json({ message: 'Amount must be between 1 and 10000' });
+        }
+
+        const user = await User.findById(req.params.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const oldCredits = user.credits;
+        user.credits = Math.max(0, user.credits - amount);
+        await user.save();
+
+        // Log the action
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'REMOVE_CREDITS',
+            targetId: user._id,
+            targetType: 'user',
+            changes: { old: oldCredits, new: user.credits, removed: amount },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: `Removed ${amount} credits from ${user.username}`,
+            credits: user.credits
+        });
+    } catch (err) {
+        console.error('❌ Remove credits error:', err);
+        res.status(500).json({ message: 'Failed to remove credits' });
+    }
+});
+
+// NEW: Reset daily credits for user (force reset)
+router.post('/users/:id/reset-daily', adminAuth, async (req, res) => {
+    try {
+        if (!validation.validateObjectId(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const user = await User.findById(req.params.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Force reset daily credits
+        if (user.isProUser()) {
+            user.subscription.dailyCredits = 30;
+        } else {
+            user.subscription.dailyCredits = 10;
+        }
+        user.subscription.lastCreditReset = new Date();
+        user.dailyAttacks.count = 0;
+        user.dailyAttacks.date = new Date();
+        await user.save();
+
+        // Log the action
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'RESET_DAILY_LIMIT',
+            targetId: user._id,
+            targetType: 'user',
+            changes: { dailyCredits: user.subscription.dailyCredits },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: `Daily limit reset for ${user.username}`,
+            dailyCredits: user.subscription.dailyCredits
+        });
+    } catch (err) {
+        console.error('❌ Reset daily error:', err);
+        res.status(500).json({ message: 'Failed to reset daily limit' });
+    }
+});
+
+// Update user (with subscription handling)
 router.patch('/users/:id', adminAuth, async (req, res) => {
     try {
         if (!validation.validateObjectId(req.params.id)) {
             return res.status(400).json({ message: 'Invalid user ID format' });
         }
 
-        const allowed = ['credits', 'isPro', 'username', 'email', 'referralCount', 'creditGiven'];
+        const allowed = ['credits', 'username', 'email', 'referralCount', 'creditGiven'];
         const sanitized = validation.validateUserInput(req.body, allowed);
 
         // Validate specific fields
@@ -381,7 +1033,7 @@ router.patch('/users/:id', adminAuth, async (req, res) => {
             return res.status(400).json({ message: 'Invalid credit amount' });
         }
 
-        // Handle password change (requires strong password)
+        // Handle password change
         if (req.body.password) {
             const feedback = validation.getPasswordFeedback(req.body.password);
             if (feedback.length > 0) {
@@ -409,6 +1061,9 @@ router.patch('/users/:id', adminAuth, async (req, res) => {
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
+
+        // Add computed fields
+        user.isPro = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
 
         // Log the action
         await createAuditLog({
@@ -465,42 +1120,63 @@ router.delete('/users/:id', adminAuth, async (req, res) => {
     }
 });
 
-// ═══════════════════════════════════════════════
-//  RESELLER ROUTES - FIXED WITH FILTERS & PAGINATION
-// ═══════════════════════════════════════════════
+// NEW: Get subscription plans
+router.get('/plans', adminAuth, async (req, res) => {
+    res.json({
+        plans: [
+            {
+                id: 'week',
+                name: 'Weekly Plan',
+                displayName: '7 Days Pro',
+                days: 7,
+                price: 850,
+                priceINR: '₹850',
+                dailyAttacks: 30,
+                maxDuration: 300,
+                description: 'Perfect for testing',
+                features: ['30 attacks per day', '300s max duration', 'Priority support']
+            },
+            {
+                id: 'month',
+                name: 'Monthly Plan',
+                displayName: '30 Days Pro',
+                days: 30,
+                price: 1800,
+                priceINR: '₹1800',
+                dailyAttacks: 30,
+                maxDuration: 300,
+                description: 'Most popular',
+                features: ['30 attacks per day', '300s max duration', 'Priority support', 'Best value']
+            },
+            {
+                id: 'season',
+                name: 'Season Plan',
+                displayName: '60 Days Pro',
+                days: 60,
+                price: 2500,
+                priceINR: '₹2500',
+                dailyAttacks: 30,
+                maxDuration: 300,
+                description: 'Best value',
+                features: ['30 attacks per day', '300s max duration', 'Priority support', 'Save 35%']
+            }
+        ]
+    });
+});
 
-/**
- * GET /api/admin/resellers
- * Query Parameters:
- * - page (number): Page number, default 1
- * - limit (number): Items per page, default 50 (max 100)
- * - search (string): Search in username, email
- * - isBlocked (string): Filter by "true" (blocked) or "false" (active)
- * 
- * Response:
- * {
- *   "resellers": [...],
- *   "total": 150,
- *   "totalPages": 3,
- *   "currentPage": 1
- * }
- */
+// ===== RESELLER ROUTES (Keep as is, they work with new system) =====
 router.get('/resellers', adminAuth, async (req, res) => {
     try {
-        // Parse and validate query parameters
         let page = parseInt(req.query.page) || 1;
         let limit = parseInt(req.query.limit) || 50;
         const search = req.query.search ? String(req.query.search).trim() : '';
-        const isBlocked = req.query.isBlocked; // Can be "true", "false", or undefined
+        const isBlocked = req.query.isBlocked;
 
-        // Validate pagination
         if (page < 1) page = 1;
         if (limit < 1 || limit > 100) limit = 50;
 
-        // Build filter query
         const query = {};
 
-        // Add search filter
         if (search && search.length > 0) {
             query.$or = [
                 { username: { $regex: search, $options: 'i' } },
@@ -508,27 +1184,23 @@ router.get('/resellers', adminAuth, async (req, res) => {
             ];
         }
 
-        // Add isBlocked filter
         if (isBlocked !== undefined) {
-            query.isBlocked = isBlocked === 'true'; // Convert string to boolean
+            query.isBlocked = isBlocked === 'true';
         }
 
-        // Count total matching documents
         const total = await Reseller.countDocuments(query);
         const totalPages = Math.ceil(total / limit);
 
-        // Ensure page is within valid range
         if (page > totalPages && totalPages > 0) {
             page = totalPages;
         }
 
-        // Fetch resellers with pagination
         const resellers = await Reseller.find(query)
-            .select('-password') // Exclude password field
+            .select('-password')
             .sort({ createdAt: -1 })
             .skip((page - 1) * limit)
             .limit(limit)
-            .lean(); // Return plain objects (faster)
+            .lean();
 
         res.json({
             resellers,
@@ -546,7 +1218,6 @@ router.post('/resellers', adminAuth, async (req, res) => {
     try {
         const { username, email, password, credits = 0 } = req.body;
 
-        // Validate inputs
         if (!username || !validation.validateUsername(username)) {
             return res.status(400).json({ message: 'Invalid username format' });
         }
@@ -575,7 +1246,6 @@ router.post('/resellers', adminAuth, async (req, res) => {
             credits
         });
 
-        // Log the action
         await createAuditLog({
             actorType: 'admin',
             action: 'CREATE_RESELLER',
@@ -637,7 +1307,6 @@ router.patch('/resellers/:id', adminAuth, async (req, res) => {
             sanitized.password = await bcrypt.hash(req.body.password, 12);
         }
 
-        // Get old values for audit
         const oldReseller = await Reseller.findById(req.params.id);
         const changes = {};
         for (const key in sanitized) {
@@ -654,7 +1323,6 @@ router.patch('/resellers/:id', adminAuth, async (req, res) => {
             return res.status(404).json({ message: 'Reseller not found' });
         }
 
-        // Log the action
         await createAuditLog({
             actorType: 'admin',
             action: 'UPDATE_RESELLER',
@@ -690,7 +1358,6 @@ router.delete('/resellers/:id', adminAuth, async (req, res) => {
             return res.status(404).json({ message: 'Reseller not found' });
         }
 
-        // Log the action
         await createAuditLog({
             actorType: 'admin',
             action: 'DELETE_RESELLER',
@@ -709,23 +1376,53 @@ router.delete('/resellers/:id', adminAuth, async (req, res) => {
     }
 });
 
-// ===== AUDIT LOG ROUTES (Admin only) =====
-
+// ===== AUDIT LOG ROUTES =====
 router.get('/audit-logs', adminAuth, async (req, res) => {
     try {
-        // Parse and validate query parameters
         let page = parseInt(req.query.page) || 1;
         let limit = parseInt(req.query.limit) || 50;
 
-        // Validate pagination
         if (page < 1) page = 1;
         if (limit < 1 || limit > 100) limit = 50;
 
-        // Count total documents
         const total = await AuditLog.countDocuments();
         const totalPages = Math.ceil(total / limit);
 
-        // Ensure page is within valid range
+        if (page > totalPages && totalPages > 0) {
+            page = totalPages;
+        }
+
+        const logs = await AuditLog.find()
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit)
+            .lean();
+
+        res.json({
+            logs,
+            total,
+            totalPages,
+            currentPage: page
+        });
+    } catch (err) {
+        console.error('❌ Audit logs error:', err);
+        res.status(500).json({ message: 'Failed to fetch audit logs' });
+    }
+});
+
+
+// ===== AUDIT LOG ROUTES =====
+router.get('/audit-logs', adminAuth, async (req, res) => {
+    try {
+        let page = parseInt(req.query.page) || 1;
+        let limit = parseInt(req.query.limit) || 50;
+
+        if (page < 1) page = 1;
+        if (limit < 1 || limit > 100) limit = 50;
+
+        const total = await AuditLog.countDocuments();
+        const totalPages = Math.ceil(total / limit);
+
         if (page > totalPages && totalPages > 0) {
             page = totalPages;
         }

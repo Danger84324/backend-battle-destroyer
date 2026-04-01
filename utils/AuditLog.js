@@ -8,7 +8,7 @@ const AuditLogSchema = new mongoose.Schema({
   },
   actorType: {
     type: String,
-    enum: ['admin', 'reseller'],
+    enum: ['admin', 'reseller', 'system'], // ADDED 'system'
     required: true
   },
   action: {
@@ -17,8 +17,10 @@ const AuditLogSchema = new mongoose.Schema({
       'LOGIN', 'LOGOUT', 'CREATE_USER', 'UPDATE_USER', 'DELETE_USER',
       'UPDATE_USER_CREDITS', 'UPDATE_USER_PASSWORD', 'CREATE_RESELLER',
       'UPDATE_RESELLER', 'DELETE_RESELLER', 'BLOCK_RESELLER', 'GIVE_CREDITS',
-      'SEARCH_USER', 'SESSION_CREATED', 'SESSION_EXPIRED', 'BRUTE_FORCE_LOCKOUT',
-      'UNAUTHORIZED_ACCESS', 'INVALID_TOKEN'
+      'GIVE_PRO_SUBSCRIPTION', 'REMOVE_PRO_SUBSCRIPTION', 'EXTEND_PRO_SUBSCRIPTION',
+      'REPLACE_PRO_SUBSCRIPTION', 'SEARCH_USER', 'SESSION_CREATED', 
+      'SESSION_EXPIRED', 'BRUTE_FORCE_LOCKOUT', 'UNAUTHORIZED_ACCESS', 
+      'INVALID_TOKEN', 'DAILY_RESET', 'DAILY_RESET_FAILED' // ADDED new actions
     ],
     required: true
   },
@@ -29,15 +31,21 @@ const AuditLogSchema = new mongoose.Schema({
   },
   targetType: {
     type: String,
-    enum: ['user', 'reseller'],
+    enum: ['user', 'reseller', 'system'], // ADDED 'system'
     sparse: true
   },
   changes: {
     type: mongoose.Schema.Types.Mixed,
     default: null
   },
-  ip: String,
-  userAgent: String,
+  ip: {
+    type: String,
+    default: 'system' // ADDED default
+  },
+  userAgent: {
+    type: String,
+    default: 'cron-job' // ADDED default
+  },
   success: {
     type: Boolean,
     default: true

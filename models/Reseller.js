@@ -1,14 +1,15 @@
+// models/Reseller.js
 const mongoose = require('mongoose');
 
-const resellerSchema = new mongoose.Schema({
-  username:  { type: String, required: true, unique: true, trim: true },
-  email:     { type: String, required: true, unique: true, lowercase: true, trim: true },
-  password:  { type: String, required: true },
-  credits:   { type: Number, default: 0, min: 0 },
+const ResellerSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, trim: true },
+  email: { type: String, required: true, unique: true, lowercase: true },
+  password: { type: String, required: true },
+  credits: { type: Number, default: 0 }, // Used as currency to buy plans
+  totalGiven: { type: Number, default: 0 }, // Total credits spent
   isBlocked: { type: Boolean, default: false },
-  totalGiven:{ type: Number, default: 0 },   // lifetime credits given to users
-  createdAt: { type: Date, default: Date.now },
-  lastLogin: { type: Date },
+  lastLogin: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('Reseller', resellerSchema);
+module.exports = mongoose.model('Reseller', ResellerSchema);

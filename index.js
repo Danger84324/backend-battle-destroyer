@@ -9,8 +9,9 @@ const cookieParser = require('cookie-parser');
 const axios = require('axios');
 require('dotenv').config();
 
-// Import BGMI service
+// Import services
 const bgmiService = require('./services/bgmiService');
+const dailyResetService = require('./services/dailyResetService');
 
 const app = express();
 
@@ -39,7 +40,6 @@ app.use(helmet({
       connectSrc: [
         "'self'",
         "https://api.battle-destroyer.shop",
-        // ✅ SAFE: only spread if env var is defined
         ...(process.env.BGMI_API_URLS ? process.env.BGMI_API_URLS.split(',').map(u => u.trim()) : [])
       ],
     }
@@ -125,13 +125,13 @@ const globalLimiter = rateLimit({
   message: { message: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
-  // AFTER
   skip: (req) => {
     if (process.env.NODE_ENV !== 'production') return true;
     if (req.path === '/' || req.path === '/api/bgmi/health' || req.path === '/api/csrf-token') return true;
     if (req.path === '/panel/stats') return true;
-    if (req.path.includes('/me')) return true;            // ← ADD
-    if (req.path.includes('/attack-status')) return true; // ← ADD
+    if (req.path.includes('/me')) return true;
+    if (req.path.includes('/attack-status')) return true;
+    if (req.path.includes('/daily-reset-status')) return true;
     return false;
   },
 });
@@ -280,6 +280,7 @@ app.use((err, req, res, next) => {
 });
 
 // ===== MONGODB CONNECTION & SERVER START =====
+// Update the server startup section in server.js
 mongoose.connect(process.env.MONGO_URI, {
   serverSelectionTimeoutMS: 5000,
 })
@@ -287,10 +288,25 @@ mongoose.connect(process.env.MONGO_URI, {
     console.log('✅ MongoDB connected successfully');
 
     await bgmiService.initialize();
+    
+    // Initialize daily reset service
+    console.log('\n🔄 Initializing Daily Reset Service...');
+    dailyResetService.start();
+    
+    // Wait a bit for service to fully initialize
+    setTimeout(() => {
+      const status = dailyResetService.getStatus();
+      console.log('✅ Daily reset service initialized');
+      console.log(`\n🔄 Daily Reset Service Configuration:`);
+      console.log(`   ├─ Schedule: ${status.schedule}`);
+      console.log(`   ├─ Timezone: ${status.timezone}`);
+      console.log(`   ├─ Status: ${status.isRunning ? '🟢 Running' : '🔴 Stopped'}`);
+      console.log(`   └─ Next Run: ${status.nextRun}`);
+    }, 100);
 
     const PORT = process.env.PORT || 5000;
     const server = app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`\n🚀 Server running on port ${PORT}`);
       console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`🔒 HTTPS: ${process.env.NODE_ENV === 'production' ? 'Enforced' : 'Disabled (dev)'}`);
       console.log(`🛡️  CSRF Protection: Enabled`);
@@ -302,10 +318,17 @@ mongoose.connect(process.env.MONGO_URI, {
       console.log(`   ├─ Admin Endpoints: 200 req/15min`);
       console.log(`   ├─ Reseller Endpoints: 60 req/15min`);
       console.log(`   └─ Health Checks: ✅ Unlimited (no rate limit)`);
+      console.log(`\n✨ Server ready!`);
     });
 
+    // Graceful shutdown
     process.on('SIGTERM', async () => {
-      console.log('SIGTERM received, shutting down gracefully...');
+      console.log('\n🛑 SIGTERM received, shutting down gracefully...');
+      
+      // Stop daily reset service
+      dailyResetService.stop();
+      console.log('✅ Daily reset service stopped');
+      
       try {
         await bgmiService.cleanup();
         console.log('✅ BGMI cleanup completed');
@@ -314,9 +337,9 @@ mongoose.connect(process.env.MONGO_URI, {
       }
 
       server.close(() => {
-        console.log('Server closed');
+        console.log('✅ Server closed');
         mongoose.connection.close(false, () => {
-          console.log('MongoDB connection closed');
+          console.log('✅ MongoDB connection closed');
           process.exit(0);
         });
       });
@@ -326,15 +349,5 @@ mongoose.connect(process.env.MONGO_URI, {
     console.error('❌ MongoDB Connection Error:', err.message);
     process.exit(1);
   });
-
-// ===== HANDLE UNHANDLED PROMISE REJECTIONS =====
-process.on('unhandledRejection', (err) => {
-  console.error('❌ Unhandled Promise Rejection:', err);
-});
-
-// ===== HANDLE UNCAUGHT EXCEPTIONS =====
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err);
-});
 
 module.exports = app;
