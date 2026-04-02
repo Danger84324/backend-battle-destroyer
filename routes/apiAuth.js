@@ -65,6 +65,7 @@ router.post('/login', async (req, res) => {
 
 // Get dashboard stats (with full API key)
 // routes/apiAuth.js - Add/modify this endpoint
+// routes/apiAuth.js - FIX the stats endpoint
 router.get('/dashboard/stats', verifyApiUserToken, async (req, res) => {
     try {
         const apiUser = await ApiUser.findById(req.apiUserId);
@@ -81,7 +82,8 @@ router.get('/dashboard/stats', verifyApiUserToken, async (req, res) => {
             await apiUser.save();
         }
         
-        const activeCount = apiUser.activeAttacks.length;
+        // FIX: Make sure these are NUMBERS, not objects
+        const activeCount = apiUser.activeAttacks.length;  // This should be a number
         
         res.json({
             success: true,
@@ -90,14 +92,17 @@ router.get('/dashboard/stats', verifyApiUserToken, async (req, res) => {
                 username: apiUser.username,
                 email: apiUser.email,
                 status: apiUser.status,
-                limits: apiUser.limits,
+                limits: {
+                    maxConcurrent: apiUser.limits.maxConcurrent,
+                    maxDuration: apiUser.limits.maxDuration
+                },
                 createdAt: apiUser.createdAt
             },
             stats: {
                 totalAttacks: apiUser.totalAttacks || 0,
                 totalRequests: apiUser.totalRequests || 0,
-                currentActiveAttacks: activeCount,
-                remainingSlots: apiUser.limits.maxConcurrent - activeCount
+                currentActiveAttacks: activeCount,  // FIX: Return number, not object
+                remainingSlots: Math.max(0, apiUser.limits.maxConcurrent - activeCount)  // FIX: Calculate properly
             },
             activeAttacks: apiUser.activeAttacks.map(a => ({
                 attackId: a.attackId,
