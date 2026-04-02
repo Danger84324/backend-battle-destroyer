@@ -85,20 +85,20 @@ function clearFailures(ip) {
 /* ─── Puzzle generator ────────────────────────────────────────── */
 
 function generatePuzzle() {
-  const op = ['+', '+', '-', '-', '*'][Math.floor(Math.random() * 5)];
+  const op = ['+', '+', '+', '-', '*'][Math.floor(Math.random() * 5)];
   let a, b, answer;
 
   if (op === '+') {
-    a = Math.floor(Math.random() * 40) + 10;
-    b = Math.floor(Math.random() * 40) + 10;
+    a = Math.floor(Math.random() * 9) + 1;  // 1–9
+    b = Math.floor(Math.random() * 9) + 1;  // 1–9
     answer = a + b;
   } else if (op === '-') {
-    a = Math.floor(Math.random() * 40) + 20;
-    b = Math.floor(Math.random() * 19) + 1;
+    a = Math.floor(Math.random() * 8) + 2;  // 2–9
+    b = Math.floor(Math.random() * (a - 1)) + 1; // 1 to (a-1) so answer is always positive
     answer = a - b;
   } else {
-    a = Math.floor(Math.random() * 8) + 2;
-    b = Math.floor(Math.random() * 8) + 2;
+    a = Math.floor(Math.random() * 4) + 2;  // 2–5
+    b = Math.floor(Math.random() * 4) + 2;  // 2–5
     answer = a * b;
   }
 
@@ -106,7 +106,7 @@ function generatePuzzle() {
   let attempts = 0;
   while (wrongSet.size < 5 && attempts < 200) {
     attempts++;
-    const delta = (Math.floor(Math.random() * 9) - 4) || 1;
+    const delta = (Math.floor(Math.random() * 4) - 2) || 1;
     const w = answer + delta;
     if (w > 0 && w !== answer) wrongSet.add(w);
   }
