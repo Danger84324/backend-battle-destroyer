@@ -10,6 +10,7 @@ const AuditLog = require('../models/AuditLog');
 const validation = require('../utils/validation');
 const { createAuditLog } = require('../utils/audit');
 const dailyResetService = require('../services/dailyResetService');
+const ApiUser = require('../models/ApiUser');
 
 // ===== REDIS SESSION STORE =====
 const redis = require('redis');
@@ -86,6 +87,313 @@ async function adminAuth(req, res, next) {
     res.status(500).json({ message: 'Authentication failed' });
   }
 }
+
+
+// GET all API users
+router.get('/api-users', adminAuth, async (req, res) => {
+    try {
+        let page = parseInt(req.query.page) || 1;
+        let limit = parseInt(req.query.limit) || 50;
+        const search = req.query.search ? String(req.query.search).trim() : '';
+        const status = req.query.status;
+
+        if (page < 1) page = 1;
+        if (limit < 1 || limit > 100) limit = 50;
+
+        const query = {};
+        if (search.length > 0) {
+            query.$or = [
+                { username: { $regex: search, $options: 'i' } },
+                { email: { $regex: search, $options: 'i' } }
+            ];
+        }
+        if (status && status !== 'all' && status !== '') {
+            query.status = status;
+        }
+
+        const total = await ApiUser.countDocuments(query);
+        const totalPages = Math.ceil(total / limit);
+        if (page > totalPages && totalPages > 0) page = totalPages;
+
+        const apiUsers = await ApiUser.find(query)
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit)
+            .lean();
+
+        // Add real-time active attack counts
+        const usersWithActive = apiUsers.map(user => ({
+            ...user,
+            currentActive: user.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0
+        }));
+
+        res.json({
+            users: usersWithActive,
+            total,
+            totalPages,
+            currentPage: page
+        });
+    } catch (err) {
+        console.error('❌ Get API users error:', err);
+        res.status(500).json({ message: 'Failed to fetch API users' });
+    }
+});
+
+// CREATE API user
+router.post('/api-users', adminAuth, async (req, res) => {
+    try {
+        const { username, email, maxConcurrent, maxDuration } = req.body;
+
+        // Validation
+        if (!username || !username.match(/^[a-zA-Z0-9_]{3,30}$/)) {
+            return res.status(400).json({ message: 'Username must be 3-30 chars (letters, numbers, underscore)' });
+        }
+        if (!email || !email.includes('@')) {
+            return res.status(400).json({ message: 'Invalid email format' });
+        }
+
+        // Check existing
+        const existing = await ApiUser.findOne({ $or: [{ username }, { email }] });
+        if (existing) {
+            return res.status(400).json({ message: 'Username or email already exists' });
+        }
+
+        // Generate credentials
+        const apiKey = 'ak_' + crypto.randomBytes(24).toString('hex');
+        const apiSecret = 'as_' + crypto.randomBytes(32).toString('hex');
+
+        const apiUser = new ApiUser({
+            username,
+            email: email.toLowerCase(),
+            apiKey,
+            apiSecret,
+            limits: {
+                maxConcurrent: maxConcurrent || 2,
+                maxDuration: maxDuration || 300
+            },
+            status: 'active'
+        });
+
+        await apiUser.save();
+
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'CREATE_API_USER',
+            targetId: apiUser._id,
+            targetType: 'api_user',
+            changes: { username, email, maxConcurrent, maxDuration },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.status(201).json({
+            message: 'API user created successfully',
+            user: {
+                id: apiUser._id,
+                username: apiUser.username,
+                email: apiUser.email,
+                apiKey: apiUser.apiKey,
+                apiSecret: apiUser.apiSecret,
+                limits: apiUser.limits,
+                status: apiUser.status,
+                createdAt: apiUser.createdAt
+            }
+        });
+    } catch (err) {
+        if (err.code === 11000) {
+            const field = Object.keys(err.keyPattern || {})[0] || 'field';
+            return res.status(400).json({ message: `${field} already in use` });
+        }
+        console.error('❌ Create API user error:', err);
+        res.status(500).json({ message: 'Failed to create API user' });
+    }
+});
+
+// GET single API user
+router.get('/api-users/:id', adminAuth, async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const apiUser = await ApiUser.findById(req.params.id).lean();
+        if (!apiUser) {
+            return res.status(404).json({ message: 'API user not found' });
+        }
+
+        // Add real-time active count
+        apiUser.currentActive = apiUser.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0;
+
+        res.json(apiUser);
+    } catch (err) {
+        console.error('❌ Get API user error:', err);
+        res.status(500).json({ message: 'Failed to fetch API user' });
+    }
+});
+
+// UPDATE API user limits
+router.patch('/api-users/:id/limits', adminAuth, async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const { maxConcurrent, maxDuration, status } = req.body;
+        const apiUser = await ApiUser.findById(req.params.id);
+        
+        if (!apiUser) {
+            return res.status(404).json({ message: 'API user not found' });
+        }
+
+        const oldLimits = { ...apiUser.limits };
+        
+        if (maxConcurrent !== undefined) apiUser.limits.maxConcurrent = maxConcurrent;
+        if (maxDuration !== undefined) apiUser.limits.maxDuration = maxDuration;
+        if (status !== undefined) apiUser.status = status;
+        
+        await apiUser.save();
+
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'UPDATE_API_USER',
+            targetId: apiUser._id,
+            targetType: 'api_user',
+            changes: { oldLimits, newLimits: apiUser.limits, status },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: 'API user updated',
+            user: {
+                id: apiUser._id,
+                username: apiUser.username,
+                limits: apiUser.limits,
+                status: apiUser.status
+            }
+        });
+    } catch (err) {
+        console.error('❌ Update API user error:', err);
+        res.status(500).json({ message: 'Failed to update API user' });
+    }
+});
+
+// REGENERATE API secret
+router.post('/api-users/:id/regenerate-secret', adminAuth, async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const apiUser = await ApiUser.findById(req.params.id);
+        if (!apiUser) {
+            return res.status(404).json({ message: 'API user not found' });
+        }
+
+        const newSecret = 'as_' + crypto.randomBytes(32).toString('hex');
+        apiUser.apiSecret = newSecret;
+        await apiUser.save();
+
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'REGENERATE_API_SECRET',
+            targetId: apiUser._id,
+            targetType: 'api_user',
+            changes: { regenerated: true },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({
+            message: 'API secret regenerated successfully',
+            apiSecret: newSecret
+        });
+    } catch (err) {
+        console.error('❌ Regenerate secret error:', err);
+        res.status(500).json({ message: 'Failed to regenerate secret' });
+    }
+});
+
+// DELETE API user
+router.delete('/api-users/:id', adminAuth, async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const apiUser = await ApiUser.findByIdAndDelete(req.params.id);
+        if (!apiUser) {
+            return res.status(404).json({ message: 'API user not found' });
+        }
+
+        await createAuditLog({
+            actorType: 'admin',
+            action: 'DELETE_API_USER',
+            targetId: req.params.id,
+            targetType: 'api_user',
+            changes: { username: apiUser.username, email: apiUser.email },
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            success: true
+        });
+
+        res.json({ message: 'API user deleted successfully' });
+    } catch (err) {
+        console.error('❌ Delete API user error:', err);
+        res.status(500).json({ message: 'Failed to delete API user' });
+    }
+});
+
+// GET API user stats
+router.get('/api-users/:id/stats', adminAuth, async (req, res) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ message: 'Invalid user ID format' });
+        }
+
+        const apiUser = await ApiUser.findById(req.params.id);
+        if (!apiUser) {
+            return res.status(404).json({ message: 'API user not found' });
+        }
+
+        const now = new Date();
+        const activeCount = apiUser.activeAttacks?.filter(a => new Date(a.expiresAt) > now).length || 0;
+
+        // Calculate rate limit usage
+        const lastMinute = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 60 * 1000).length || 0;
+        const lastHour = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 60 * 60 * 1000).length || 0;
+        const lastDay = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 24 * 60 * 60 * 1000).length || 0;
+
+        res.json({
+            username: apiUser.username,
+            status: apiUser.status,
+            limits: apiUser.limits,
+            totalRequests: apiUser.totalRequests || 0,
+            totalAttacks: apiUser.totalAttacks || 0,
+            currentActiveAttacks: activeCount,
+            currentRateLimits: {
+                lastMinute,
+                lastHour,
+                lastDay
+            },
+            activeAttacks: apiUser.activeAttacks
+                .filter(a => new Date(a.expiresAt) > now)
+                .map(a => ({
+                    attackId: a.attackId,
+                    target: a.target,
+                    port: a.port,
+                    startedAt: a.startedAt,
+                    expiresIn: Math.floor((new Date(a.expiresAt) - now) / 1000)
+                }))
+        });
+    } catch (err) {
+        console.error('❌ Get API user stats error:', err);
+        res.status(500).json({ message: 'Failed to fetch stats' });
+    }
+});
 
 // ===== POST /api/admin/session — exchange secret for session token =====
 router.post('/session', async (req, res) => {

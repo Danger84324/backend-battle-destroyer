@@ -7,13 +7,16 @@ const { ipKeyGenerator } = require('express-rate-limit');
 const csrf = require('csurf');
 const cookieParser = require('cookie-parser');
 const axios = require('axios');
+const crypto = require('crypto'); // Added for API key generation
 require('dotenv').config();
 const { router: captchaRouter } = require('./routes/captcha');
-
+const apiAdminRoutes = require('./routes/apiAdmin');
+const apiExternalRoutes = require('./routes/apiExternal');
+const apiAuthRoutes = require('./routes/apiAuth');
 // Import services
 const bgmiService = require('./services/bgmiService');
 const dailyResetService = require('./services/dailyResetService');
-
+const ApiUser = require('./models/ApiUser');
 const app = express();
 
 // ===== TRUST PROXY (for production behind load balancer) =====
@@ -76,7 +79,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Admin-Token'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Admin-Token', 'X-API-Key', 'X-Timestamp', 'X-Signature'],
   maxAge: 86400
 }));
 
@@ -87,7 +90,7 @@ app.use(express.urlencoded({ limit: '10kb', extended: true }));
 // ===== COOKIE PARSER (for CSRF) =====
 app.use(cookieParser(process.env.COOKIE_SECRET || 'your-cookie-secret'));
 
-// ===== CSRF PROTECTION =====
+// ===== CSRF PROTECTION (Exclude API routes) =====
 const csrfProtection = csrf({
   cookie: {
     httpOnly: true,
@@ -133,7 +136,8 @@ const globalLimiter = rateLimit({
     if (req.path.includes('/me')) return true;
     if (req.path.includes('/attack-status')) return true;
     if (req.path.includes('/daily-reset-status')) return true;
-    if (req.path === '/api/captcha/challenge') return true; 
+    if (req.path === '/api/captcha/challenge') return true;
+    if (req.path.startsWith('/api/v1/health')) return true; // API health check
     return false;
   },
 });
@@ -177,23 +181,43 @@ const resellerLimiter = rateLimit({
   validate: { trustProxy: false, xForwardedForHeader: false }
 });
 
-// Apply global limiter to all /api routes (but with skip conditions above)
-app.use('/api/', globalLimiter);
-app.use('/api/captcha', captchaRouter); 
-// Apply attack limiter
-app.use('/api/panel/attack', attackLimiter);
+// API rate limiter (for external API users)
+const apiRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100, // Default max, each user has their own limits in the database
+  message: { error: 'Rate limit exceeded', message: 'Please slow down your requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Use API key for rate limiting
+    return req.headers['x-api-key'] || req.headers['authorization'] || ipKeyGenerator(req);
+  },
+  skip: (req) => !req.path.startsWith('/api/v1')
+});
 
-// Apply admin and reseller limiters
+// Apply rate limiters
+app.use('/api/', globalLimiter);
+app.use('/api/captcha', captchaRouter);
+app.use('/api/panel/attack', attackLimiter);
 app.use('/api/admin', adminLimiter);
 app.use('/api/reseller', resellerLimiter);
+app.use('/api/v1', apiExternalRoutes);
+app.use('/api/api-auth', apiAuthRoutes);
+// ===== ROUTES MOUNTING (Order matters!) =====
 
-// ===== HEALTH CHECK - NO RATE LIMIT =====
+// Public routes (no authentication needed)
 app.get('/', async (req, res) => {
   try {
     const bgmiHealth = await bgmiService.checkHealth();
     res.json({
       message: '✅ Battle Destroyer API is running',
       version: '1.0.0',
+      endpoints: {
+        public: ['GET /', 'GET /api/bgmi/health', 'GET /api/csrf-token'],
+        auth: ['POST /api/auth/login', 'POST /api/auth/register'],
+        api: ['POST /api/v1/attack', 'GET /api/v1/stats', 'GET /api/v1/health'],
+        admin: ['POST /api/admin/api-users', 'GET /api/admin/api-users']
+      },
       bgmiHealth: {
         healthy: bgmiHealth.healthy,
         total: bgmiHealth.total,
@@ -205,13 +229,19 @@ app.get('/', async (req, res) => {
     res.json({
       message: '✅ Battle Destroyer API is running (BGMI health check failed)',
       version: '1.0.0',
+      endpoints: {
+        public: ['GET /', 'GET /api/bgmi/health', 'GET /api/csrf-token'],
+        auth: ['POST /api/auth/login', 'POST /api/auth/register'],
+        api: ['POST /api/v1/attack', 'GET /api/v1/stats', 'GET /api/v1/health'],
+        admin: ['POST /api/admin/api-users', 'GET /api/admin/api-users']
+      },
       bgmiHealth: { healthy: 0, total: 0, successRate: '0%' },
       environment: process.env.NODE_ENV || 'development'
     });
   }
 });
 
-// ===== BGMI HEALTH CHECK ENDPOINT - NO RATE LIMIT =====
+// BGMI health check endpoint
 app.get('/api/bgmi/health', async (req, res) => {
   try {
     const health = await bgmiService.checkHealth();
@@ -225,14 +255,24 @@ app.get('/api/bgmi/health', async (req, res) => {
   }
 });
 
-// ===== CSRF TOKEN ENDPOINT - NO RATE LIMIT =====
+// CSRF token endpoint (protected)
 app.get('/api/csrf-token', csrfProtection, (req, res) => {
   res.json({ csrfToken: req.csrfToken() });
 });
 
-// ===== ROUTES (with CSRF protection on admin & reseller) =====
+// ===== AUTH ROUTES (no CSRF needed for login/register) =====
 app.use('/api/auth', require('./routes/auth'));
+
+// ===== PANEL ROUTES (for web dashboard) =====
 app.use('/api/panel', require('./routes/panel'));
+
+// ===== API USER MANAGEMENT (Admin only, NO CSRF - uses JWT) =====
+// This must come BEFORE the admin route with CSRF
+
+// ===== EXTERNAL API FOR CUSTOMERS (NO CSRF - uses API keys) =====
+app.use('/api/v1', apiExternalRoutes);
+
+// ===== ADMIN AND RESELLER ROUTES (with CSRF protection) =====
 app.use('/api/admin', csrfProtection, require('./routes/admin'));
 app.use('/api/reseller', csrfProtection, require('./routes/reseller'));
 
@@ -247,13 +287,21 @@ app.use((req, res, next) => {
 
 // ===== 404 HANDLER =====
 app.use((req, res) => {
-  res.status(404).json({ message: '❌ Route not found', path: req.path });
+  res.status(404).json({ 
+    error: 'Route not found',
+    message: `❌ ${req.method} ${req.path} does not exist`,
+    path: req.path,
+    method: req.method
+  });
 });
 
 // ===== CSRF ERROR HANDLER =====
 app.use((err, req, res, next) => {
   if (err.code === 'EBADCSRFTOKEN') {
-    return res.status(403).json({ message: 'Invalid CSRF token' });
+    return res.status(403).json({ 
+      error: 'Invalid CSRF token',
+      message: 'CSRF token validation failed' 
+    });
   }
   next(err);
 });
@@ -276,13 +324,20 @@ app.use((err, req, res, next) => {
     : err.message;
 
   res.status(statusCode).json({
+    error: 'Server error',
     message,
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
 
+setInterval(async () => {
+    try {
+        await ApiUser.cleanExpiredAttacks();
+    } catch (error) {
+        console.error('Cleanup job error:', error);
+    }
+}, 60000);
 // ===== MONGODB CONNECTION & SERVER START =====
-// Update the server startup section in server.js
 mongoose.connect(process.env.MONGO_URI, {
   serverSelectionTimeoutMS: 5000,
 })
@@ -311,7 +366,7 @@ mongoose.connect(process.env.MONGO_URI, {
       console.log(`\n🚀 Server running on port ${PORT}`);
       console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`🔒 HTTPS: ${process.env.NODE_ENV === 'production' ? 'Enforced' : 'Disabled (dev)'}`);
-      console.log(`🛡️  CSRF Protection: Enabled`);
+      console.log(`🛡️  CSRF Protection: Enabled (except API routes)`);
       console.log(`📦 Max Request Size: 10KB`);
       console.log(`🔗 BGMI APIs: ${bgmiService.getApiCount()} endpoints configured`);
       console.log(`\n📊 Rate Limiting Configuration:`);
@@ -319,7 +374,13 @@ mongoose.connect(process.env.MONGO_URI, {
       console.log(`   ├─ Attack Endpoint: 5 req/1min (STRICT)`);
       console.log(`   ├─ Admin Endpoints: 200 req/15min`);
       console.log(`   ├─ Reseller Endpoints: 60 req/15min`);
+      console.log(`   ├─ External API: 100 req/min (per user)`);
       console.log(`   └─ Health Checks: ✅ Unlimited (no rate limit)`);
+      console.log(`\n🔑 API Endpoints Available:`);
+      console.log(`   ├─ External API: /api/v1/attack, /api/v1/stats, /api/v1/health`);
+      console.log(`   ├─ Admin API: /api/admin/api-users (CRUD operations)`);
+      console.log(`   ├─ Auth: /api/auth/login, /api/auth/register`);
+      console.log(`   └─ Panel: /api/panel/*`);
       console.log(`\n✨ Server ready!`);
     });
 
