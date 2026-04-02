@@ -110,6 +110,17 @@ function resellerAuth(req, res, next) {
   }
 }
 
+const resellerSearchLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 20, // 20 searches per minute max (prevents user enumeration)
+  message: { message: 'Too many search attempts. Please wait 1 minute before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`,
+  validate: { trustProxy: false, xForwardedForHeader: false },
+  skipSuccessfulRequests: false // Count both successful and failed searches
+});
+
 // ===== POST /api/reseller/login =====
 router.post('/login', loginLimiter, async (req, res) => {
   const ip = req.ip;
@@ -296,7 +307,7 @@ router.get('/me', resellerAuth, async (req, res) => {
 });
 
 // ===== GET /api/reseller/search-user =====
-router.get('/search-user', resellerAuth, actionLimiter, async (req, res) => {
+router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
 

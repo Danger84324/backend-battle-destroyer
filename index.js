@@ -122,6 +122,20 @@ app.use((req, res, next) => {
 
 // ===== RATE LIMITERS CONFIGURATION =====
 
+
+// Reseller search rate limiter (stricter for search operations)
+const resellerSearchLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 searches per minute max
+  message: { message: 'Too many search requests, please wait before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    return `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`;
+  },
+  validate: { trustProxy: false, xForwardedForHeader: false }
+});
+
 // Global rate limiter (for most API endpoints)
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
