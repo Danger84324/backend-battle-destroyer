@@ -8,6 +8,7 @@ const csrf = require('csurf');
 const cookieParser = require('cookie-parser');
 const axios = require('axios');
 require('dotenv').config();
+const { router: captchaRouter } = require('./routes/captcha');
 
 // Import services
 const bgmiService = require('./services/bgmiService');
@@ -132,6 +133,7 @@ const globalLimiter = rateLimit({
     if (req.path.includes('/me')) return true;
     if (req.path.includes('/attack-status')) return true;
     if (req.path.includes('/daily-reset-status')) return true;
+    if (req.path === '/api/captcha/challenge') return true; 
     return false;
   },
 });
@@ -177,7 +179,7 @@ const resellerLimiter = rateLimit({
 
 // Apply global limiter to all /api routes (but with skip conditions above)
 app.use('/api/', globalLimiter);
-
+app.use('/api/captcha', captchaRouter); 
 // Apply attack limiter
 app.use('/api/panel/attack', attackLimiter);
 
