@@ -1,21 +1,48 @@
 // routes/reseller.js (Updated for subscription system)
-const express  = require('express');
-const router   = express.Router();
-const bcrypt   = require('bcryptjs');
-const jwt      = require('jsonwebtoken');
+const express = require('express');
+const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = require('express-rate-limit');
 const Reseller = require('../models/Reseller');
-const User     = require('../models/User');
+const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const validation = require('../utils/validation');
 const { createAuditLog } = require('../utils/audit');
 
-// Updated plans for subscription system
+// ── PLAN DEFINITIONS ──
+// These match exactly with frontend PLANS array
+// Credits = wholesale cost to reseller (₹1 per credit)
+// Customer price = fixed selling price in INR
 const PLANS = [
-  { label: 'Week',  days: 7,  price: 850,  displayName: 'Weekly Pro (7 days)' },
-  { label: 'Month', days: 30, price: 1800, displayName: 'Monthly Pro (30 days)' },
-  { label: 'Season', days: 90, price: 2500, displayName: 'Season Pro (90 days)' },
+  {
+    label: 'Week',
+    days: 7,
+    credits: 200,        // Cost to reseller in credits (₹200)
+    customerPrice: 850,  // Fixed selling price (₹850)
+    displayName: 'Weekly Pro (7 days)',
+    profit: 650,         // 850 - 200
+    multiplier: 4.25
+  },
+  {
+    label: 'Month',
+    days: 30,
+    credits: 400,        // Cost to reseller in credits (₹400)
+    customerPrice: 1800, // Fixed selling price (₹1800)
+    displayName: 'Monthly Pro (30 days)',
+    profit: 1400,        // 1800 - 400
+    multiplier: 4.5
+  },
+  {
+    label: 'Season',
+    days: 90,            // 90 days as per your frontend
+    credits: 800,        // Cost to reseller in credits (₹800)
+    customerPrice: 2500, // Fixed selling price (₹2500)
+    displayName: 'Season Pro (90 days)',
+    profit: 1700,        // 2500 - 800
+    multiplier: 3.125
+  },
 ];
 
 // ===== RATE LIMITERS =====
@@ -302,17 +329,21 @@ router.get('/search-user', resellerAuth, actionLimiter, async (req, res) => {
     }
 
     // Add computed subscription status
-    user.isProActive = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
-    user.subscriptionStatus = user.isProActive ? {
-      plan: user.subscription.plan,
-      daysLeft: Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24)),
-      expiresAt: user.subscription.expiresAt
-    } : null;
+    const isProActive = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
+    let subscriptionStatus = null;
+
+    if (isProActive && user.subscription) {
+      subscriptionStatus = {
+        plan: user.subscription.plan,
+        daysLeft: Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24)),
+        expiresAt: user.subscription.expiresAt
+      };
+    }
 
     await createAuditLog({
       actorType: 'reseller',
       actorId: reseller._id,
-      action: 'SEARCH_USER',
+      action: 'RESELLER_SEARCH_USER',
       targetId: user._id,
       targetType: 'user',
       ip: req.ip,
@@ -320,14 +351,18 @@ router.get('/search-user', resellerAuth, actionLimiter, async (req, res) => {
       success: true
     });
 
-    res.json(user);
+    res.json({
+      ...user,
+      isPro: isProActive,
+      subscriptionStatus
+    });
   } catch (err) {
     console.error('❌ Search user error:', err);
 
     await createAuditLog({
       actorType: 'reseller',
       actorId: req.resellerId,
-      action: 'SEARCH_USER',
+      action: 'RESELLER_SEARCH_USER',
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: false,
@@ -338,7 +373,8 @@ router.get('/search-user', resellerAuth, actionLimiter, async (req, res) => {
   }
 });
 
-// ===== POST /api/reseller/give-pro ===== (Updated: Give Pro subscription instead of credits)
+// ===== POST /api/reseller/give-pro =====
+// Gives Pro subscription to user, deducts credits from reseller
 router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
@@ -361,15 +397,15 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     if (!plan) {
       return res.status(400).json({
         message: `Invalid plan. Choose from: ${PLANS.map(p => p.label).join(', ')}`,
-        plans: PLANS.map(p => ({ label: p.label, days: p.days, price: p.price }))
+        plans: PLANS.map(p => ({ label: p.label, days: p.days, credits: p.credits, customerPrice: p.customerPrice }))
       });
     }
 
-    // Check if reseller has enough credits (using credits as currency)
-    if (reseller.credits < plan.price) {
+    // Check if reseller has enough credits
+    if (reseller.credits < plan.credits) {
       return res.status(400).json({
-        message: `Insufficient credits. You have ${reseller.credits}, plan requires ${plan.price} credits.`,
-        needed: plan.price,
+        message: `Insufficient credits. You have ${reseller.credits}, plan requires ${plan.credits} credits.`,
+        needed: plan.credits,
         available: reseller.credits
       });
     }
@@ -384,44 +420,50 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     }
 
     // Get old subscription info for audit
-    const oldSubscription = {
-      type: user.subscription?.type,
-      plan: user.subscription?.plan,
-      expiresAt: user.subscription?.expiresAt
-    };
+    const oldSubscription = user.subscription ? {
+      type: user.subscription.type,
+      plan: user.subscription.plan,
+      expiresAt: user.subscription.expiresAt
+    } : null;
 
-    // Give Pro subscription to user
-    const daysAdded = user.addProSubscription(plan.label.toLowerCase(), plan.days);
+    // Give Pro subscription to user using the addProSubscription method
+    // Note: Make sure your User model has this method
+    const daysAdded = user.addProSubscription ?
+      user.addProSubscription(plan.label.toLowerCase(), plan.days) :
+      await giveProSubscriptionDirect(user, plan.label, plan.days);
+
     await user.save();
 
     // Deduct credits from reseller
-    const resellerNewCredits = reseller.credits - plan.price;
-    await Reseller.findByIdAndUpdate(reseller._id, {
-      $inc: { credits: -plan.price, totalGiven: plan.price }
-    });
+    const newResellerCredits = reseller.credits - plan.credits;
+    reseller.credits = newResellerCredits;
+    reseller.totalGiven = (reseller.totalGiven || 0) + plan.credits;
+    await reseller.save();
 
     // Get updated subscription status
-    const newSubscriptionStatus = {
-      active: user.isProUser(),
+    const isProActive = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
+    const subscriptionStatus = isProActive && user.subscription ? {
       plan: user.subscription.plan,
       daysLeft: Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24)),
       expiresAt: user.subscription.expiresAt
-    };
+    } : null;
 
     // Audit log
     await createAuditLog({
       actorType: 'reseller',
       actorId: reseller._id,
-      action: 'GIVE_PRO_SUBSCRIPTION',
+      action: 'RESELLER_GIVE_PRO',
       targetId: user._id,
       targetType: 'user',
       changes: {
         plan: plan.label,
         days: plan.days,
-        price: plan.price,
+        creditsUsed: plan.credits,
+        customerPrice: plan.customerPrice,
+        profit: plan.profit,
         oldSubscription,
         newSubscription: user.subscription,
-        resellerCredits: resellerNewCredits
+        resellerCreditsLeft: newResellerCredits
       },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
@@ -432,34 +474,64 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
       message: `✅ ${plan.displayName} (${plan.days} days) successfully given to ${user.username}! They now have Pro access.`,
       plan: plan.label,
       daysGiven: plan.days,
-      price: plan.price,
-      resellerCreditsLeft: resellerNewCredits,
+      creditsUsed: plan.credits,
+      customerPrice: plan.customerPrice,
+      profit: plan.profit,
+      resellerCreditsLeft: newResellerCredits,
       user: {
         id: user._id,
         username: user.username,
         email: user.email,
-        isPro: user.isProUser(),
-        subscription: newSubscriptionStatus
+        isPro: isProActive,
+        subscription: subscriptionStatus
       }
     });
   } catch (err) {
     console.error('❌ Give pro error:', err);
-    
+
     await createAuditLog({
       actorType: 'reseller',
       actorId: req.resellerId,
-      action: 'GIVE_PRO_SUBSCRIPTION',
+      action: 'RESELLER_GIVE_PRO',
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: false,
       error: err.message
     });
-    
+
     res.status(500).json({ message: 'Server error: ' + err.message });
   }
 });
 
-// ===== GET /api/reseller/plans ===== (New endpoint to get available plans)
+// Helper function to give pro subscription directly if model method doesn't exist
+async function giveProSubscriptionDirect(user, planLabel, days) {
+  const now = new Date();
+  const newExpiry = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+  // Check if user already has active pro subscription
+  if (user.subscription?.type === 'pro' && user.subscription?.expiresAt > now) {
+    // Extend existing subscription
+    const currentExpiry = new Date(user.subscription.expiresAt);
+    const extendedExpiry = new Date(currentExpiry.getTime() + days * 24 * 60 * 60 * 1000);
+    user.subscription.expiresAt = extendedExpiry;
+    user.subscription.plan = planLabel;
+  } else {
+    // Create new subscription
+    user.subscription = {
+      type: 'pro',
+      plan: planLabel,
+      expiresAt: newExpiry,
+      attacksPerDay: 30,
+      startedAt: now
+    };
+  }
+
+  user.isPro = true;
+  return days;
+}
+
+// ===== GET /api/reseller/plans =====
+// Returns available plans with pricing info
 router.get('/plans', resellerAuth, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
@@ -472,7 +544,10 @@ router.get('/plans', resellerAuth, async (req, res) => {
         label: plan.label,
         displayName: plan.displayName,
         days: plan.days,
-        price: plan.price,
+        credits: plan.credits,
+        customerPrice: plan.customerPrice,
+        profit: plan.profit,
+        multiplier: plan.multiplier,
         description: `${plan.days} days of Pro access with 30 attacks per day`
       })),
       myCredits: reseller.credits
@@ -483,7 +558,8 @@ router.get('/plans', resellerAuth, async (req, res) => {
   }
 });
 
-// ===== GET /api/reseller/stats ===== (New endpoint for reseller stats)
+// ===== GET /api/reseller/stats =====
+// Returns reseller statistics
 router.get('/stats', resellerAuth, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
@@ -491,17 +567,17 @@ router.get('/stats', resellerAuth, async (req, res) => {
       return res.status(403).json({ message: 'Account is not active' });
     }
 
-    // Get users this reseller has given pro subscriptions to
-    const usersGiven = await User.find({
-      referredBy: { $exists: true },
-      // You might want to track which reseller gave the subscription
-      // This requires adding resellerId field to User model
-    }).countDocuments();
+    // Get count of users who have pro subscription (you may need to track which reseller gave it)
+    // For now, just return basic stats
+    const usersServed = await User.countDocuments({
+      'subscription.type': 'pro',
+      'subscription.expiresAt': { $gt: new Date() }
+    });
 
     res.json({
       credits: reseller.credits,
       totalGiven: reseller.totalGiven,
-      usersServed: usersGiven,
+      usersServed: usersServed,
       lastLogin: reseller.lastLogin,
       createdAt: reseller.createdAt
     });
@@ -511,19 +587,17 @@ router.get('/stats', resellerAuth, async (req, res) => {
   }
 });
 
-// ===== POST /api/reseller/add-credits ===== (Admin can add credits to reseller)
-// Note: This should ideally be in admin routes, but keeping for completeness
+// ===== POST /api/reseller/add-credits =====
+// Admin can add credits to reseller (protected by secret)
 router.post('/add-credits', resellerAuth, async (req, res) => {
   try {
-    // Only allow if reseller has special permission
-    // You might want to add a field to Reseller model like 'canAddCredits'
     const reseller = await Reseller.findById(req.resellerId);
     if (!reseller || reseller.isBlocked) {
       return res.status(403).json({ message: 'Account is not active' });
     }
 
     const { amount, secret } = req.body;
-    
+
     // Verify special secret for adding credits
     if (secret !== process.env.RESELLER_ADD_CREDITS_SECRET) {
       return res.status(403).json({ message: 'Unauthorized' });
