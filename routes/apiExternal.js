@@ -250,53 +250,6 @@ router.get('/stats', async (req, res) => {
     }
 });
 
-// Stop an attack
-router.post('/stop-attack', async (req, res) => {
-    try {
-        const { attackId } = req.body;
-        const apiUser = req.apiUser;
-        
-        if (!attackId) {
-            return res.status(400).json({ error: 'attackId required' });
-        }
-        
-        const attack = apiUser.activeAttacks.find(a => a.attackId === attackId);
-        if (!attack) {
-            return res.status(404).json({ error: 'Attack not found' });
-        }
-        
-        // Optional: Call external API to stop attack
-        const externalApiUrl = process.env.API_URL || process.env.EXTERNAL_API_URL;
-        const externalApiKey = process.env.API_KEY || process.env.EXTERNAL_API_KEY;
-        
-        if (externalApiUrl && externalApiKey) {
-            try {
-                await axios.post(`${externalApiUrl}/stop`, {
-                    attackId: attackId
-                }, {
-                    headers: { 
-                        'x-api-key': externalApiKey,
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 5000
-                }).catch(() => {});
-            } catch (stopError) {
-                console.log('[API Stop] Could not stop external attack:', stopError.message);
-            }
-        }
-        
-        await apiUser.removeActiveAttack(attackId);
-        
-        res.json({ 
-            success: true, 
-            message: `Attack ${attackId} stopped successfully` 
-        });
-    } catch (error) {
-        console.error('[API Stop] Error:', error);
-        res.status(500).json({ error: 'Failed to stop attack' });
-    }
-});
-
 // Health check
 router.get('/health', (req, res) => {
     res.json({ 
