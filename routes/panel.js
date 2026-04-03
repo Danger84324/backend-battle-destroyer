@@ -1,13 +1,45 @@
-// routes/panel.js (Updated version)
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/authMiddleware');
 const User = require('../models/User');
 const axios = require('axios');
 const Stats = require('../models/Stats');
-const bgmiService = require('../services/bgmiService');
+const CryptoJS = require('crypto-js');
+const { verifyCaptcha } = require('./captcha');
 require('dotenv').config();
 const rateLimit = require('express-rate-limit');
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-key-2024-battle-destroyer';
+
+/* ─── Encryption Helpers ──────────────────────────────────────── */
+
+function decryptData(encryptedData) {
+    try {
+        const bytes = CryptoJS.AES.decrypt(encryptedData, ENCRYPTION_KEY);
+        const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+        if (!decrypted) throw new Error('Decryption failed');
+        return JSON.parse(decrypted);
+    } catch (error) {
+        console.error('Decryption error:', error);
+        throw new Error('Invalid encrypted data');
+    }
+}
+
+function encryptResponse(data) {
+    const jsonString = JSON.stringify(data);
+    return CryptoJS.AES.encrypt(jsonString, ENCRYPTION_KEY).toString();
+}
+
+function verifyHash(data, receivedHash) {
+    const jsonString = JSON.stringify(data);
+    const calculatedHash = CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
+    return calculatedHash === receivedHash;
+}
+
+function createHash(data) {
+    const jsonString = JSON.stringify(data);
+    return CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
+}
 
 // In-memory attack tracker
 const activeAttacks = new Map();
@@ -15,179 +47,263 @@ const activeAttacks = new Map();
 // Blocked ports
 const BLOCKED_PORTS = new Set([8700, 20000, 443, 17500, 9031, 20002, 20001]);
 
-// Captcha blacklist
-const usedCaptchaTokens = new Map();
-
-function blacklistToken(token) {
-    usedCaptchaTokens.set(token, Date.now() + 310_000);
-    for (const [t, exp] of usedCaptchaTokens) {
-        if (Date.now() > exp) usedCaptchaTokens.delete(t);
-    }
-}
-
-function isTokenBlacklisted(token) {
-    const exp = usedCaptchaTokens.get(token);
-    if (!exp) return false;
-    if (Date.now() > exp) { usedCaptchaTokens.delete(token); return false; }
-    return true;
-}
-
-async function verifyTurnstile(token, ip) {
-    if (!token || token.length < 10) return { success: false };
-    if (isTokenBlacklisted(token)) return { success: false, 'error-codes': ['duplicate-use'] };
+// Middleware to decrypt request
+async function decryptRequest(req, res, next) {
     try {
-        const params = new URLSearchParams({
-            secret: process.env.TURNSTILE_SECRET,
-            response: token,
-        });
-        if (ip && ip !== '::1' && !ip.startsWith('::ffff:127')) {
-            params.append('remoteip', ip);
+        const { encrypted, hash } = req.method === 'GET' ? req.query : req.body;
+
+        if (!encrypted || !hash) {
+            return res.status(400).json({ message: 'Encrypted data required' });
         }
-        const { data } = await axios.post(
-            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-            params,
-            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-        );
-        if (data.success) blacklistToken(token);
-        return data;
-    } catch {
-        return { success: false };
+
+        const decryptedData = decryptData(encrypted);
+
+        if (!verifyHash(decryptedData, hash)) {
+            return res.status(400).json({ message: 'Data integrity check failed' });
+        }
+
+        const currentTime = Date.now();
+        const timeDiff = Math.abs(currentTime - decryptedData.timestamp);
+        if (timeDiff > 5 * 60 * 1000) {
+            return res.status(400).json({ message: 'Request expired. Please try again.' });
+        }
+
+        req.decryptedData = decryptedData;
+        next();
+    } catch (err) {
+        console.error('Decryption middleware error:', err);
+        const errorResponse = { message: 'Invalid encrypted payload' };
+        const encryptedError = encryptResponse(errorResponse);
+        const errorHash = createHash(errorResponse);
+        return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
     }
 }
 
 // GET /api/panel/me
-router.get('/me', auth, async (req, res) => {
+router.get('/me', auth, decryptRequest, async (req, res) => {
     try {
         const user = await User.findById(req.user.id).select('-password');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        
+        if (!user) {
+            const errorResponse = { message: 'User not found' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(404).json({ encrypted: encryptedError, hash: errorHash });
+        }
+
         await user.checkAndResetDailyCredits();
-        
-        res.json({
+
+        const responseData = {
             ...user.toObject(),
             isPro: user.isProUser(),
             remainingAttacks: await user.getRemainingAttacks(),
             maxDuration: user.getMaxDuration(),
             subscriptionStatus: user.getSubscriptionStatus()
-        });
-    } catch {
-        res.status(500).json({ message: 'Server error' });
+        };
+
+        const encryptedResponse = encryptResponse(responseData);
+        const responseHash = createHash(responseData);
+        res.json({ encrypted: encryptedResponse, hash: responseHash });
+    } catch (err) {
+        console.error('Me route error:', err);
+        const errorResponse = { message: 'Server error' };
+        const encryptedError = encryptResponse(errorResponse);
+        const errorHash = createHash(errorResponse);
+        res.status(500).json({ encrypted: encryptedError, hash: errorHash });
     }
 });
 
 // GET /api/panel/attack-status
-router.get('/attack-status', auth, async (req, res) => {
+router.get('/attack-status', auth, decryptRequest, async (req, res) => {
     try {
         const attackInfo = activeAttacks.get(req.user.id.toString());
 
+        let responseData;
         if (!attackInfo) {
-            return res.json({ success: true, data: { status: 'idle' } });
-        }
-
-        const elapsed = Date.now() - new Date(attackInfo.startedAt).getTime();
-        if (elapsed >= attackInfo.duration * 1000) {
-            activeAttacks.delete(req.user.id.toString());
-            return res.json({ success: true, data: { status: 'completed' } });
-        }
-
-        return res.json({
-            success: true,
-            data: {
-                status: 'running',
-                ip: attackInfo.ip,
-                port: attackInfo.port,
-                duration: attackInfo.duration,
-                startedAt: attackInfo.startedAt,
-                timeLeft: attackInfo.duration - Math.floor(elapsed / 1000)
+            responseData = { success: true, data: { status: 'idle' } };
+        } else {
+            const elapsed = Date.now() - new Date(attackInfo.startedAt).getTime();
+            if (elapsed >= attackInfo.duration * 1000) {
+                activeAttacks.delete(req.user.id.toString());
+                responseData = { success: true, data: { status: 'completed' } };
+            } else {
+                responseData = {
+                    success: true,
+                    data: {
+                        status: 'running',
+                        ip: attackInfo.ip,
+                        port: attackInfo.port,
+                        duration: attackInfo.duration,
+                        startedAt: attackInfo.startedAt,
+                        timeLeft: attackInfo.duration - Math.floor(elapsed / 1000)
+                    }
+                };
             }
-        });
+        }
+
+        const encryptedResponse = encryptResponse(responseData);
+        const responseHash = createHash(responseData);
+        res.json({ encrypted: encryptedResponse, hash: responseHash });
     } catch (err) {
         console.error('Attack status error:', err);
-        res.status(500).json({ message: 'Server error. Please try again.' });
+        const errorResponse = { message: 'Server error. Please try again.' };
+        const encryptedError = encryptResponse(errorResponse);
+        const errorHash = createHash(errorResponse);
+        res.status(500).json({ encrypted: encryptedError, hash: errorHash });
     }
 });
 
-// GET /api/panel/stats
+// GET /api/panel/stats — PUBLIC (no auth, no decryptRequest — shown on homepage)
 const statsLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 10,
+    max: 30,
     message: { totalAttacks: 0, totalUsers: 0 }
 });
 
 router.get('/stats', statsLimiter, async (req, res) => {
     try {
         const stats = await Stats.findById('global');
-        res.json({
+        const responseData = {
             totalAttacks: stats?.totalAttacks || 0,
-            totalUsers: stats?.totalUsers || 0,
-        });
-    } catch {
-        res.status(500).json({ message: 'Server error' });
+            totalUsers:   stats?.totalUsers   || 0,
+        };
+
+        const encryptedResponse = encryptResponse(responseData);
+        const responseHash = createHash(responseData);
+        res.json({ encrypted: encryptedResponse, hash: responseHash });
+    } catch (err) {
+        console.error('Stats error:', err);
+        const errorResponse = { totalAttacks: 0, totalUsers: 0 };
+        const encryptedError = encryptResponse(errorResponse);
+        const errorHash = createHash(errorResponse);
+        res.status(500).json({ encrypted: encryptedError, hash: errorHash });
     }
 });
 
-// POST /api/panel/attack - UPDATED with new credit/daily system
-router.post('/attack', auth, async (req, res) => {
+// Helper to get client IP
+function getClientIp(req) {
+    const raw = req.headers['cf-connecting-ip'] ||
+                req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+                req.ip || '';
+    let ip = raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+    if (ip === '::1') ip = '127.0.0.1';
+    return ip;
+}
+
+// POST /api/panel/attack
+// POST /api/panel/attack
+router.post('/attack', auth, decryptRequest, async (req, res) => {
     try {
         const user = await User.findById(req.user.id).select('-password');
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (!user) {
+            const errorResponse = { message: 'User not found' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(404).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
-        const { ip, port, duration, captchaToken } = req.body;
+        const { ip, port, duration, captchaData } = req.decryptedData;
 
-        if (!ip || !port || !duration)
-            return res.status(400).json({ message: 'IP, port, and duration are required' });
+        if (!ip || !port || !duration || !captchaData) {
+            const errorResponse = { message: 'IP, port, duration, and captcha are required' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
-        const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip;
-        const captchaResult = await verifyTurnstile(captchaToken, clientIp);
-        if (!captchaResult.success)
-            return res.status(403).json({ message: 'Captcha verification failed. Please try again.' });
+        // ===== UPDATED CAPTCHA VERIFICATION FOR hCaptcha =====
+        const clientIp = getClientIp(req);
+        
+        // Extract token from captchaData (which is { token, ekey, timestamp })
+        const captchaToken = captchaData.token || captchaData;
+        
+        const captchaResult = await verifyCaptcha(
+            captchaToken,  // Pass just the token string
+            null,          // No hash needed for hCaptcha
+            clientIp
+        );
+
+        if (!captchaResult.ok) {
+            const errorResponse = { message: captchaResult.reason || 'Captcha verification failed. Please try again.' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(403).json({ encrypted: encryptedError, hash: errorHash });
+        }
+
+        console.log(`[ATTACK] Captcha verified for ${user.username}`);
 
         // Validate IP
         const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
-        if (!ipRegex.test(ip))
-            return res.status(400).json({ message: 'Invalid IP address format' });
+        if (!ipRegex.test(ip)) {
+            const errorResponse = { message: 'Invalid IP address format' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
         // Validate port
         const portNum = parseInt(port);
-        if (isNaN(portNum) || portNum < 1 || portNum > 65535)
-            return res.status(400).json({ message: 'Port must be between 1 and 65535' });
+        if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+            const errorResponse = { message: 'Port must be between 1 and 65535' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
-        if (BLOCKED_PORTS.has(portNum))
-            return res.status(400).json({ message: `Port ${portNum} is blocked.` });
+        if (BLOCKED_PORTS.has(portNum)) {
+            const errorResponse = { message: `Port ${portNum} is blocked.` };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
-        // Validate duration based on user type
+        // Validate duration
         const durNum = parseInt(duration);
         const MAX_DURATION = user.isProUser() ? 300 : 60;
 
-        if (isNaN(durNum) || durNum < 1)
-            return res.status(400).json({ message: 'Duration must be at least 1 second' });
+        if (isNaN(durNum) || durNum < 1) {
+            const errorResponse = { message: 'Duration must be at least 1 second' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
-        if (durNum > MAX_DURATION)
-            return res.status(403).json({
+        if (durNum > MAX_DURATION) {
+            const errorResponse = {
                 message: user.isProUser()
                     ? 'Duration cannot exceed 300 seconds'
                     : 'Free accounts limited to 60s. Upgrade to Pro for 300s.',
                 maxDuration: MAX_DURATION,
                 isPro: user.isProUser(),
-            });
+            };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(403).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
-        // Check if user can attack (new method)
+        // Check if user can attack
         const canAttack = await user.canAttack();
         if (!canAttack) {
             const remaining = await user.getRemainingAttacks();
-            return res.status(403).json({ 
-                message: user.isProUser() 
+            const errorResponse = {
+                message: user.isProUser()
                     ? 'Daily attack limit reached (30 attacks). Please try again tomorrow.'
                     : 'Insufficient credits. Purchase credits or upgrade to Pro for unlimited attacks!',
                 remainingAttacks: remaining,
                 isPro: user.isProUser(),
                 maxAttacks: user.isProUser() ? 30 : 'credits based'
-            });
+            };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(403).json({ encrypted: encryptedError, hash: errorHash });
         }
 
         // Check for active attack
-        if (activeAttacks.has(user._id.toString()))
-            return res.status(400).json({ message: 'You already have an attack running.' });
+        if (activeAttacks.has(user._id.toString())) {
+            const errorResponse = { message: 'You already have an attack running.' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+        }
 
         // Call external API
         const response = await axios.post(
@@ -204,20 +320,19 @@ router.post('/attack', auth, async (req, res) => {
 
         if (response.status !== 200 || response.data?.error) {
             if (response.data?.error?.includes('Max concurrent')) {
-                return res.status(429).json({
-                    message: 'Server busy. Please wait 5 seconds and try again.',
-                    cooldown: 5
-                });
+                const errorResponse = { message: 'Server busy. Please wait 5 seconds and try again.', cooldown: 5 };
+                const encryptedError = encryptResponse(errorResponse);
+                const errorHash = createHash(errorResponse);
+                return res.status(429).json({ encrypted: encryptedError, hash: errorHash });
             }
-            return res.status(response.status || 400).json({
-                message: response.data?.error || 'Failed to start attack'
-            });
+            const errorResponse = { message: response.data?.error || 'Failed to start attack' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(response.status || 400).json({ encrypted: encryptedError, hash: errorHash });
         }
 
-        // Use one attack (deducts from credits for free users, from daily for pro)
+        // Use one attack
         await user.useAttack();
-        
-        // Get updated remaining attacks
         const remainingAttacks = await user.getRemainingAttacks();
 
         const startedAt = new Date().toISOString();
@@ -229,35 +344,53 @@ router.post('/attack', auth, async (req, res) => {
 
         await Stats.findByIdAndUpdate('global', { $inc: { totalAttacks: 1 } }, { upsert: true });
 
-        return res.json({
-            message: user.isProUser() 
+        const responseData = {
+            message: user.isProUser()
                 ? `Attack launched! (${remainingAttacks} attacks remaining today)`
                 : `Attack launched! (${remainingAttacks} credits remaining)`,
             attack: { ip, port: portNum, duration: durNum, startedAt },
-            remainingAttacks: remainingAttacks,
+            remainingAttacks,
             isPro: user.isProUser(),
             credits: user.credits,
             dailyCredits: user.subscription.dailyCredits,
-            totalAttacks: user.totalAttacks
-        });
+            totalAttacks: user.totalAttacks,
+            user: {
+                username: user.username,
+                credits: user.credits,
+                isPro: user.isProUser(),
+                remainingAttacks
+            }
+        };
+
+        const encryptedResponse = encryptResponse(responseData);
+        const responseHash = createHash(responseData);
+        res.json({ encrypted: encryptedResponse, hash: responseHash });
 
     } catch (err) {
         console.error(`[ERROR] Attack route: ${err.message}`);
-        res.status(500).json({ message: err.message || 'Server error. Please try again.' });
+        const errorResponse = { message: err.message || 'Server error. Please try again.' };
+        const encryptedError = encryptResponse(errorResponse);
+        const errorHash = createHash(errorResponse);
+        res.status(500).json({ encrypted: encryptedError, hash: errorHash });
     }
 });
 
-// NEW: Get user dashboard stats
-router.get('/dashboard', auth, async (req, res) => {
+// GET /api/panel/dashboard
+router.get('/dashboard', auth, decryptRequest, async (req, res) => {
     try {
         const user = await User.findById(req.user.id).select('-password');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        
+        if (!user) {
+            const errorResponse = { message: 'User not found' };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(404).json({ encrypted: encryptedError, hash: errorHash });
+        }
+
         await user.checkAndResetDailyCredits();
-        
+
         const subscriptionStatus = user.getSubscriptionStatus();
-        
-        res.json({
+
+        const responseData = {
             user: {
                 username: user.username,
                 email: user.email,
@@ -275,10 +408,17 @@ router.get('/dashboard', auth, async (req, res) => {
                 maxDuration: user.getMaxDuration(),
                 subscription: subscriptionStatus
             }
-        });
+        };
+
+        const encryptedResponse = encryptResponse(responseData);
+        const responseHash = createHash(responseData);
+        res.json({ encrypted: encryptedResponse, hash: responseHash });
     } catch (err) {
         console.error('Dashboard error:', err);
-        res.status(500).json({ message: 'Server error' });
+        const errorResponse = { message: 'Server error' };
+        const encryptedError = encryptResponse(errorResponse);
+        const errorHash = createHash(errorResponse);
+        res.status(500).json({ encrypted: encryptedError, hash: errorHash });
     }
 });
 

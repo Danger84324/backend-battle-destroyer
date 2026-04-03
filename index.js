@@ -7,9 +7,8 @@ const { ipKeyGenerator } = require('express-rate-limit');
 const csrf = require('csurf');
 const cookieParser = require('cookie-parser');
 const axios = require('axios');
-const crypto = require('crypto'); // Added for API key generation
+const crypto = require('crypto');
 require('dotenv').config();
-const { router: captchaRouter } = require('./routes/captcha');
 const apiAdminRoutes = require('./routes/apiAdmin');
 const apiExternalRoutes = require('./routes/apiExternal');
 const apiAuthRoutes = require('./routes/apiAuth');
@@ -18,6 +17,9 @@ const bgmiService = require('./services/bgmiService');
 const dailyResetService = require('./services/dailyResetService');
 const ApiUser = require('./models/ApiUser');
 const app = express();
+
+// Optional: If you want a captcha endpoint, uncomment this
+// const captchaRoutes = require('./routes/captchaRoutes');
 
 // ===== TRUST PROXY (for production behind load balancer) =====
 app.set('trust proxy', 1);
@@ -70,7 +72,6 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, server-to-server)
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -122,11 +123,10 @@ app.use((req, res, next) => {
 
 // ===== RATE LIMITERS CONFIGURATION =====
 
-
 // Reseller search rate limiter (stricter for search operations)
 const resellerSearchLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 30, // 30 searches per minute max
+  windowMs: 60 * 1000,
+  max: 30,
   message: { message: 'Too many search requests, please wait before trying again.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -138,7 +138,7 @@ const resellerSearchLimiter = rateLimit({
 
 // Global rate limiter (for most API endpoints)
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   message: { message: 'Too many requests, please try again later.' },
   standardHeaders: true,
@@ -151,14 +151,14 @@ const globalLimiter = rateLimit({
     if (req.path.includes('/attack-status')) return true;
     if (req.path.includes('/daily-reset-status')) return true;
     if (req.path === '/api/captcha/challenge') return true;
-    if (req.path.startsWith('/api/v1/health')) return true; // API health check
+    if (req.path.startsWith('/api/v1/health')) return true;
     return false;
   },
 });
 
 // Attack rate limiter (STRICT - most sensitive endpoint)
 const attackLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
+  windowMs: 60 * 1000,
   max: 5,
   message: { message: 'Too many attack requests, please try again later.' },
   standardHeaders: true,
@@ -167,14 +167,14 @@ const attackLimiter = rateLimit({
   skip: (req) => !req.path.includes('attack')
 });
 
-// Admin rate limiter (for admin panel operations)
+// Admin rate limiter
 const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 200,
   message: { message: 'Too many admin requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: true, // Only count failed requests (brute force protection)
+  skipSuccessfulRequests: true,
   keyGenerator: (req) => {
     return `${ipKeyGenerator(req)}:${req.headers['x-admin-token'] || 'anonymous'}`;
   },
@@ -183,7 +183,7 @@ const adminLimiter = rateLimit({
 
 // Reseller rate limiter
 const resellerLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 60,
   message: { message: 'Too many reseller requests, please try again later.' },
   standardHeaders: true,
@@ -195,15 +195,14 @@ const resellerLimiter = rateLimit({
   validate: { trustProxy: false, xForwardedForHeader: false }
 });
 
-// API rate limiter (for external API users)
+// API rate limiter
 const apiRateLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 100, // Default max, each user has their own limits in the database
+  windowMs: 60 * 1000,
+  max: 100,
   message: { error: 'Rate limit exceeded', message: 'Please slow down your requests' },
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    // Use API key for rate limiting
     return req.headers['x-api-key'] || req.headers['authorization'] || ipKeyGenerator(req);
   },
   skip: (req) => !req.path.startsWith('/api/v1')
@@ -211,15 +210,18 @@ const apiRateLimiter = rateLimit({
 
 // Apply rate limiters
 app.use('/api/', globalLimiter);
-app.use('/api/captcha', captchaRouter);
 app.use('/api/panel/attack', attackLimiter);
 app.use('/api/admin', adminLimiter);
 app.use('/api/reseller', resellerLimiter);
 app.use('/api/v1', apiExternalRoutes);
 app.use('/api/api-auth', apiAuthRoutes);
-// ===== ROUTES MOUNTING (Order matters!) =====
 
-// Public routes (no authentication needed)
+// If you want to use the captcha route, uncomment this line:
+// app.use('/api/captcha', captchaRoutes);
+
+// ===== ROUTES MOUNTING =====
+
+// Public routes
 app.get('/', async (req, res) => {
   try {
     const bgmiHealth = await bgmiService.checkHealth();
@@ -269,28 +271,25 @@ app.get('/api/bgmi/health', async (req, res) => {
   }
 });
 
-// CSRF token endpoint (protected)
+// CSRF token endpoint
 app.get('/api/csrf-token', csrfProtection, (req, res) => {
   res.json({ csrfToken: req.csrfToken() });
 });
 
-// ===== AUTH ROUTES (no CSRF needed for login/register) =====
+// ===== AUTH ROUTES =====
 app.use('/api/auth', require('./routes/auth'));
 
-// ===== PANEL ROUTES (for web dashboard) =====
+// ===== PANEL ROUTES =====
 app.use('/api/panel', require('./routes/panel'));
 
-// ===== API USER MANAGEMENT (Admin only, NO CSRF - uses JWT) =====
-// This must come BEFORE the admin route with CSRF
-
-// ===== EXTERNAL API FOR CUSTOMERS (NO CSRF - uses API keys) =====
+// ===== EXTERNAL API =====
 app.use('/api/v1', apiExternalRoutes);
 
-// ===== ADMIN AND RESELLER ROUTES (with CSRF protection) =====
+// ===== ADMIN AND RESELLER ROUTES =====
 app.use('/api/admin', csrfProtection, require('./routes/admin'));
 app.use('/api/reseller', csrfProtection, require('./routes/reseller'));
 
-// ===== SECURITY HEADERS FOR API RESPONSES =====
+// ===== SECURITY HEADERS =====
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -344,21 +343,15 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ===== CLEANUP JOBS (FIXED - removed duplicate) =====
 setInterval(async () => {
-    try {
-        await ApiUser.cleanExpiredAttacks();
-    } catch (error) {
-        console.error('Cleanup job error:', error);
-    }
-}, 60000);
+  try {
+    await ApiUser.cleanExpiredAttacks();
+  } catch (error) {
+    console.error('Cleanup job error:', error);
+  }
+}, 60000); // Only ONE interval, not two
 
-setInterval(async () => {
-    try {
-        await ApiUser.cleanExpiredAttacks();
-    } catch (error) {
-        console.error('Cleanup job error:', error);
-    }
-}, 60000);
 // ===== MONGODB CONNECTION & SERVER START =====
 mongoose.connect(process.env.MONGO_URI, {
   serverSelectionTimeoutMS: 5000,
@@ -368,11 +361,9 @@ mongoose.connect(process.env.MONGO_URI, {
 
     await bgmiService.initialize();
     
-    // Initialize daily reset service
     console.log('\n🔄 Initializing Daily Reset Service...');
     dailyResetService.start();
     
-    // Wait a bit for service to fully initialize
     setTimeout(() => {
       const status = dailyResetService.getStatus();
       console.log('✅ Daily reset service initialized');
@@ -410,7 +401,6 @@ mongoose.connect(process.env.MONGO_URI, {
     process.on('SIGTERM', async () => {
       console.log('\n🛑 SIGTERM received, shutting down gracefully...');
       
-      // Stop daily reset service
       dailyResetService.stop();
       console.log('✅ Daily reset service stopped');
       

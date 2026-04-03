@@ -1,11 +1,11 @@
 const express = require('express');
-const router  = express.Router();
-const bcrypt  = require('bcryptjs');
-const jwt     = require('jsonwebtoken');
+const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const CryptoJS = require('crypto-js');
-const User    = require('../models/User');
-const Stats   = require('../models/Stats');
-const { verifyCaptcha } = require('./captcha');
+const User = require('../models/User');
+const Stats = require('../models/Stats');
+const { verifyCaptcha } = require('./captcha'); // Your hCaptcha module
 
 // Encryption configuration
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-key-2024-battle-destroyer';
@@ -53,14 +53,14 @@ function getIp(req) {
 
 function validatePassword(password) {
   const errors = [];
-  if (!password || password.length < 8)  errors.push('Min 8 characters');
-  if (!/[A-Z]/.test(password))           errors.push('At least 1 uppercase letter');
-  if (!/[0-9]/.test(password))           errors.push('At least 1 number');
-  if (!/[^A-Za-z0-9]/.test(password))   errors.push('At least 1 special character');
+  if (!password || password.length < 8) errors.push('Min 8 characters');
+  if (!/[A-Z]/.test(password)) errors.push('At least 1 uppercase letter');
+  if (!/[0-9]/.test(password)) errors.push('At least 1 number');
+  if (!/[^A-Za-z0-9]/.test(password)) errors.push('At least 1 special character');
   return errors;
 }
 
-/* ─── SIGNUP with full encryption ───────────────────────────────── */
+/* ─── SIGNUP with hCaptcha ───────────────────────────────── */
 
 router.post('/signup', async (req, res) => {
   try {
@@ -108,17 +108,24 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
-    /* Captcha verification */
+    /* Captcha verification - FIXED for hCaptcha */
     const ip = getIp(req);
-    const captcha = verifyCaptcha(
-      captchaData.encrypted,
-      captchaData.hash,
+    
+    // Extract token from captchaData (which comes from frontend as { token, ekey, timestamp })
+    const captchaToken = captchaData.token || captchaData;
+    
+    const captcha = await verifyCaptcha(
+      captchaToken,  // Pass just the token string
+      null,          // No hash needed
       ip
     );
-    
+
     if (!captcha.ok) {
+      console.log(`[Signup] Captcha failed for ${email}: ${captcha.reason}`);
       return res.status(400).json({ message: captcha.reason || 'Captcha verification failed' });
     }
+
+    console.log(`[Signup] Captcha passed for ${email}`);
 
     /* Password strength */
     const pwErrors = validatePassword(password);
@@ -246,7 +253,7 @@ router.post('/signup', async (req, res) => {
   }
 });
 
-/* ─── LOGIN with full encryption ────────────────────────────────── */
+/* ─── LOGIN with hCaptcha ────────────────────────────────── */
 
 router.post('/login', async (req, res) => {
   try {
@@ -286,17 +293,24 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
-    /* Captcha verification */
+    /* Captcha verification - FIXED for hCaptcha */
     const ip = getIp(req);
-    const captcha = verifyCaptcha(
-      captchaData.encrypted,
-      captchaData.hash,
+    
+    // Extract token from captchaData
+    const captchaToken = captchaData.token || captchaData;
+    
+    const captcha = await verifyCaptcha(  // ✅ Added 'await' keyword
+      captchaToken,  // ✅ Pass just the token
+      null,          // ✅ No hash needed
       ip
     );
-    
+
     if (!captcha.ok) {
+      console.log(`[Login] Captcha failed for ${email}: ${captcha.reason}`);
       return res.status(400).json({ message: captcha.reason || 'Captcha verification failed' });
     }
+
+    console.log(`[Login] Captcha passed for ${email}`);
 
     /* Credentials */
     const user = await User.findOne({ email });
