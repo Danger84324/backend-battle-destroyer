@@ -11,6 +11,39 @@ const validation = require('../utils/validation');
 const { createAuditLog } = require('../utils/audit');
 const dailyResetService = require('../services/dailyResetService');
 const ApiUser = require('../models/ApiUser');
+const { verifyCaptcha } = require('./captcha');
+
+const CryptoJS = require('crypto-js');
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-key-2024-battle-destroyer';
+
+function decryptData(encryptedData) {
+  try {
+    const bytes = CryptoJS.AES.decrypt(encryptedData, ENCRYPTION_KEY);
+    const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+    if (!decrypted) throw new Error('Decryption failed');
+    return JSON.parse(decrypted);
+  } catch (error) {
+    console.error('Decryption error:', error);
+    throw new Error('Invalid encrypted data');
+  }
+}
+
+function encryptResponse(data) {
+  const jsonString = JSON.stringify(data);
+  return CryptoJS.AES.encrypt(jsonString, ENCRYPTION_KEY).toString();
+}
+
+function createHash(data) {
+  const jsonString = JSON.stringify(data);
+  return CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
+}
+
+function sendEncryptedError(res, statusCode, message) {
+  const errorResponse = { success: false, message };
+  const encryptedError = encryptResponse(errorResponse);
+  const errorHash = createHash(errorResponse);
+  return res.status(statusCode).json({ encrypted: encryptedError, hash: errorHash });
+}
 
 // ===== REDIS SESSION STORE =====
 const redis = require('redis');
@@ -90,418 +123,418 @@ async function adminAuth(req, res, next) {
 
 
 router.post('/api-users/:id/extend', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const { days } = req.body;
-        
-        if (!days || days < 1 || days > 365) {
-            return res.status(400).json({ message: 'Days must be between 1 and 365' });
-        }
-
-        const apiUser = await ApiUser.findById(req.params.id);
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        const oldExpiry = apiUser.expiresAt;
-        const newExpiry = await apiUser.extendExpiration(days);
-
-        await createAuditLog({
-            actorType: 'api_user',
-            action: 'EXTEND_API_USER',
-            targetId: apiUser._id,
-            targetType: 'api_user',
-            changes: { days, oldExpiry, newExpiry },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        res.json({
-            success: true,
-            message: `API user expiration extended by ${days} days`,
-            expiresAt: newExpiry,
-            daysRemaining: apiUser.getDaysRemaining()
-        });
-    } catch (err) {
-        console.error('❌ Extend API user error:', err);
-        res.status(500).json({ message: 'Failed to extend expiration' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const { days } = req.body;
+
+    if (!days || days < 1 || days > 365) {
+      return res.status(400).json({ message: 'Days must be between 1 and 365' });
+    }
+
+    const apiUser = await ApiUser.findById(req.params.id);
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    const oldExpiry = apiUser.expiresAt;
+    const newExpiry = await apiUser.extendExpiration(days);
+
+    await createAuditLog({
+      actorType: 'api_user',
+      action: 'EXTEND_API_USER',
+      targetId: apiUser._id,
+      targetType: 'api_user',
+      changes: { days, oldExpiry, newExpiry },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.json({
+      success: true,
+      message: `API user expiration extended by ${days} days`,
+      expiresAt: newExpiry,
+      daysRemaining: apiUser.getDaysRemaining()
+    });
+  } catch (err) {
+    console.error('❌ Extend API user error:', err);
+    res.status(500).json({ message: 'Failed to extend expiration' });
+  }
 });
 
 // SET API user expiration (replace)
 router.post('/api-users/:id/set-expiration', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const { days } = req.body;
-        
-        if (!days || days < 1 || days > 365) {
-            return res.status(400).json({ message: 'Days must be between 1 and 365' });
-        }
-
-        const apiUser = await ApiUser.findById(req.params.id);
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        const oldExpiry = apiUser.expiresAt;
-        apiUser.expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-        if (apiUser.status === 'expired') {
-            apiUser.status = 'active';
-        }
-        await apiUser.save();
-
-        await createAuditLog({
-            actorType: 'admin',
-            action: 'SET_API_USER_EXPIRATION',
-            targetId: apiUser._id,
-            targetType: 'api_user',
-            changes: { days, oldExpiry, newExpiry: apiUser.expiresAt },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        res.json({
-            success: true,
-            message: `API user expiration set to ${days} days`,
-            expiresAt: apiUser.expiresAt,
-            daysRemaining: apiUser.getDaysRemaining()
-        });
-    } catch (err) {
-        console.error('❌ Set API user expiration error:', err);
-        res.status(500).json({ message: 'Failed to set expiration' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const { days } = req.body;
+
+    if (!days || days < 1 || days > 365) {
+      return res.status(400).json({ message: 'Days must be between 1 and 365' });
+    }
+
+    const apiUser = await ApiUser.findById(req.params.id);
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    const oldExpiry = apiUser.expiresAt;
+    apiUser.expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    if (apiUser.status === 'expired') {
+      apiUser.status = 'active';
+    }
+    await apiUser.save();
+
+    await createAuditLog({
+      actorType: 'admin',
+      action: 'SET_API_USER_EXPIRATION',
+      targetId: apiUser._id,
+      targetType: 'api_user',
+      changes: { days, oldExpiry, newExpiry: apiUser.expiresAt },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.json({
+      success: true,
+      message: `API user expiration set to ${days} days`,
+      expiresAt: apiUser.expiresAt,
+      daysRemaining: apiUser.getDaysRemaining()
+    });
+  } catch (err) {
+    console.error('❌ Set API user expiration error:', err);
+    res.status(500).json({ message: 'Failed to set expiration' });
+  }
 });
 
 // GET all API users
 router.get('/api-users', adminAuth, async (req, res) => {
-    try {
-        let page = parseInt(req.query.page) || 1;
-        let limit = parseInt(req.query.limit) || 50;
-        const search = req.query.search ? String(req.query.search).trim() : '';
-        const status = req.query.status;
+  try {
+    let page = parseInt(req.query.page) || 1;
+    let limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search ? String(req.query.search).trim() : '';
+    const status = req.query.status;
 
-        if (page < 1) page = 1;
-        if (limit < 1 || limit > 100) limit = 50;
+    if (page < 1) page = 1;
+    if (limit < 1 || limit > 100) limit = 50;
 
-        const query = {};
-        if (search.length > 0) {
-            query.$or = [
-                { username: { $regex: search, $options: 'i' } },
-                { email: { $regex: search, $options: 'i' } }
-            ];
-        }
-        if (status && status !== 'all' && status !== '') {
-            query.status = status;
-        }
-
-        const total = await ApiUser.countDocuments(query);
-        const totalPages = Math.ceil(total / limit);
-        if (page > totalPages && totalPages > 0) page = totalPages;
-
-        const apiUsers = await ApiUser.find(query)
-            .sort({ createdAt: -1 })
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .lean();
-
-        // Add real-time info
-        const usersWithInfo = apiUsers.map(user => ({
-            ...user,
-            currentActive: user.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0,
-            isExpired: user.expiresAt ? new Date(user.expiresAt) < new Date() : false,
-            daysRemaining: user.expiresAt ? Math.max(0, Math.ceil((new Date(user.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))) : null
-        }));
-
-        res.json({
-            users: usersWithInfo,
-            total,
-            totalPages,
-            currentPage: page
-        });
-    } catch (err) {
-        console.error('❌ Get API users error:', err);
-        res.status(500).json({ message: 'Failed to fetch API users' });
+    const query = {};
+    if (search.length > 0) {
+      query.$or = [
+        { username: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
     }
+    if (status && status !== 'all' && status !== '') {
+      query.status = status;
+    }
+
+    const total = await ApiUser.countDocuments(query);
+    const totalPages = Math.ceil(total / limit);
+    if (page > totalPages && totalPages > 0) page = totalPages;
+
+    const apiUsers = await ApiUser.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // Add real-time info
+    const usersWithInfo = apiUsers.map(user => ({
+      ...user,
+      currentActive: user.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0,
+      isExpired: user.expiresAt ? new Date(user.expiresAt) < new Date() : false,
+      daysRemaining: user.expiresAt ? Math.max(0, Math.ceil((new Date(user.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))) : null
+    }));
+
+    res.json({
+      users: usersWithInfo,
+      total,
+      totalPages,
+      currentPage: page
+    });
+  } catch (err) {
+    console.error('❌ Get API users error:', err);
+    res.status(500).json({ message: 'Failed to fetch API users' });
+  }
 });
 
 // CREATE API user
 router.post('/api-users', adminAuth, async (req, res) => {
-    try {
-        const { username, email, maxConcurrent, maxDuration, expirationDays = 30 } = req.body;
+  try {
+    const { username, email, maxConcurrent, maxDuration, expirationDays = 30 } = req.body;
 
-        // Validation
-        if (!username || !username.match(/^[a-zA-Z0-9_]{3,30}$/)) {
-            return res.status(400).json({ message: 'Username must be 3-30 chars (letters, numbers, underscore)' });
-        }
-        if (!email || !email.includes('@')) {
-            return res.status(400).json({ message: 'Invalid email format' });
-        }
-
-        // Check existing
-        const existing = await ApiUser.findOne({ $or: [{ username }, { email }] });
-        if (existing) {
-            return res.status(400).json({ message: 'Username or email already exists' });
-        }
-
-        // Generate credentials
-        const apiKey = 'ak_' + crypto.randomBytes(24).toString('hex');
-        const apiSecret = 'as_' + crypto.randomBytes(32).toString('hex');
-
-        // Calculate expiration date (default 30 days)
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + (expirationDays || 30));
-
-        const apiUser = new ApiUser({
-            username,
-            email: email.toLowerCase(),
-            apiKey,
-            apiSecret,
-            limits: {
-                maxConcurrent: maxConcurrent || 2,
-                maxDuration: maxDuration || 300
-            },
-            status: 'active',
-            expiresAt: expiresAt
-        });
-
-        await apiUser.save();
-
-        await createAuditLog({
-            actorType: 'api_user',
-            action: 'CREATE_API_USER',
-            targetId: apiUser._id,
-            targetType: 'api_user',
-            changes: { username, email, maxConcurrent, maxDuration, expirationDays },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        res.status(201).json({
-            message: 'API user created successfully',
-            user: {
-                id: apiUser._id,
-                username: apiUser.username,
-                email: apiUser.email,
-                apiKey: apiUser.apiKey,
-                apiSecret: apiUser.apiSecret,
-                limits: apiUser.limits,
-                status: apiUser.status,
-                expiresAt: apiUser.expiresAt,
-                daysRemaining: apiUser.getDaysRemaining(),
-                createdAt: apiUser.createdAt
-            }
-        });
-    } catch (err) {
-        if (err.code === 11000) {
-            const field = Object.keys(err.keyPattern || {})[0] || 'field';
-            return res.status(400).json({ message: `${field} already in use` });
-        }
-        console.error('❌ Create API user error:', err);
-        res.status(500).json({ message: 'Failed to create API user' });
+    // Validation
+    if (!username || !username.match(/^[a-zA-Z0-9_]{3,30}$/)) {
+      return res.status(400).json({ message: 'Username must be 3-30 chars (letters, numbers, underscore)' });
     }
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    // Check existing
+    const existing = await ApiUser.findOne({ $or: [{ username }, { email }] });
+    if (existing) {
+      return res.status(400).json({ message: 'Username or email already exists' });
+    }
+
+    // Generate credentials
+    const apiKey = 'ak_' + crypto.randomBytes(24).toString('hex');
+    const apiSecret = 'as_' + crypto.randomBytes(32).toString('hex');
+
+    // Calculate expiration date (default 30 days)
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + (expirationDays || 30));
+
+    const apiUser = new ApiUser({
+      username,
+      email: email.toLowerCase(),
+      apiKey,
+      apiSecret,
+      limits: {
+        maxConcurrent: maxConcurrent || 2,
+        maxDuration: maxDuration || 300
+      },
+      status: 'active',
+      expiresAt: expiresAt
+    });
+
+    await apiUser.save();
+
+    await createAuditLog({
+      actorType: 'api_user',
+      action: 'CREATE_API_USER',
+      targetId: apiUser._id,
+      targetType: 'api_user',
+      changes: { username, email, maxConcurrent, maxDuration, expirationDays },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.status(201).json({
+      message: 'API user created successfully',
+      user: {
+        id: apiUser._id,
+        username: apiUser.username,
+        email: apiUser.email,
+        apiKey: apiUser.apiKey,
+        apiSecret: apiUser.apiSecret,
+        limits: apiUser.limits,
+        status: apiUser.status,
+        expiresAt: apiUser.expiresAt,
+        daysRemaining: apiUser.getDaysRemaining(),
+        createdAt: apiUser.createdAt
+      }
+    });
+  } catch (err) {
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern || {})[0] || 'field';
+      return res.status(400).json({ message: `${field} already in use` });
+    }
+    console.error('❌ Create API user error:', err);
+    res.status(500).json({ message: 'Failed to create API user' });
+  }
 });
 
 // GET single API user
 router.get('/api-users/:id', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const apiUser = await ApiUser.findById(req.params.id).lean();
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        // Add real-time active count
-        apiUser.currentActive = apiUser.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0;
-
-        res.json(apiUser);
-    } catch (err) {
-        console.error('❌ Get API user error:', err);
-        res.status(500).json({ message: 'Failed to fetch API user' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const apiUser = await ApiUser.findById(req.params.id).lean();
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    // Add real-time active count
+    apiUser.currentActive = apiUser.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0;
+
+    res.json(apiUser);
+  } catch (err) {
+    console.error('❌ Get API user error:', err);
+    res.status(500).json({ message: 'Failed to fetch API user' });
+  }
 });
 
 // UPDATE API user limits
 router.patch('/api-users/:id/limits', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const { maxConcurrent, maxDuration, status } = req.body;
-        const apiUser = await ApiUser.findById(req.params.id);
-        
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        const oldLimits = { ...apiUser.limits };
-        
-        if (maxConcurrent !== undefined) apiUser.limits.maxConcurrent = maxConcurrent;
-        if (maxDuration !== undefined) apiUser.limits.maxDuration = maxDuration;
-        if (status !== undefined) apiUser.status = status;
-        
-        await apiUser.save();
-
-        await createAuditLog({
-            actorType: 'api_user',
-            action: 'UPDATE_API_USER',
-            targetId: apiUser._id,
-            targetType: 'api_user',
-            changes: { oldLimits, newLimits: apiUser.limits, status },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        res.json({
-            message: 'API user updated',
-            user: {
-                id: apiUser._id,
-                username: apiUser.username,
-                limits: apiUser.limits,
-                status: apiUser.status,
-                expiresAt: apiUser.expiresAt,
-                daysRemaining: apiUser.getDaysRemaining()
-            }
-        });
-    } catch (err) {
-        console.error('❌ Update API user error:', err);
-        res.status(500).json({ message: 'Failed to update API user' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const { maxConcurrent, maxDuration, status } = req.body;
+    const apiUser = await ApiUser.findById(req.params.id);
+
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    const oldLimits = { ...apiUser.limits };
+
+    if (maxConcurrent !== undefined) apiUser.limits.maxConcurrent = maxConcurrent;
+    if (maxDuration !== undefined) apiUser.limits.maxDuration = maxDuration;
+    if (status !== undefined) apiUser.status = status;
+
+    await apiUser.save();
+
+    await createAuditLog({
+      actorType: 'api_user',
+      action: 'UPDATE_API_USER',
+      targetId: apiUser._id,
+      targetType: 'api_user',
+      changes: { oldLimits, newLimits: apiUser.limits, status },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.json({
+      message: 'API user updated',
+      user: {
+        id: apiUser._id,
+        username: apiUser.username,
+        limits: apiUser.limits,
+        status: apiUser.status,
+        expiresAt: apiUser.expiresAt,
+        daysRemaining: apiUser.getDaysRemaining()
+      }
+    });
+  } catch (err) {
+    console.error('❌ Update API user error:', err);
+    res.status(500).json({ message: 'Failed to update API user' });
+  }
 });
 
 // REGENERATE API secret
 router.post('/api-users/:id/regenerate-secret', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const apiUser = await ApiUser.findById(req.params.id);
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        const newSecret = 'as_' + crypto.randomBytes(32).toString('hex');
-        apiUser.apiSecret = newSecret;
-        await apiUser.save();
-
-        await createAuditLog({
-            actorType: 'api_user',
-            action: 'REGENERATE_API_SECRET',
-            targetId: apiUser._id,
-            targetType: 'api_user',
-            changes: { regenerated: true },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        res.json({
-            message: 'API secret regenerated successfully',
-            apiSecret: newSecret
-        });
-    } catch (err) {
-        console.error('❌ Regenerate secret error:', err);
-        res.status(500).json({ message: 'Failed to regenerate secret' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const apiUser = await ApiUser.findById(req.params.id);
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    const newSecret = 'as_' + crypto.randomBytes(32).toString('hex');
+    apiUser.apiSecret = newSecret;
+    await apiUser.save();
+
+    await createAuditLog({
+      actorType: 'api_user',
+      action: 'REGENERATE_API_SECRET',
+      targetId: apiUser._id,
+      targetType: 'api_user',
+      changes: { regenerated: true },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.json({
+      message: 'API secret regenerated successfully',
+      apiSecret: newSecret
+    });
+  } catch (err) {
+    console.error('❌ Regenerate secret error:', err);
+    res.status(500).json({ message: 'Failed to regenerate secret' });
+  }
 });
 
 // DELETE API user
 router.delete('/api-users/:id', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const apiUser = await ApiUser.findByIdAndDelete(req.params.id);
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        await createAuditLog({
-            actorType: 'api_user',
-            action: 'DELETE_API_USER',
-            targetId: req.params.id,
-            targetType: 'api_user',
-            changes: { username: apiUser.username, email: apiUser.email },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        res.json({ message: 'API user deleted successfully' });
-    } catch (err) {
-        console.error('❌ Delete API user error:', err);
-        res.status(500).json({ message: 'Failed to delete API user' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const apiUser = await ApiUser.findByIdAndDelete(req.params.id);
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    await createAuditLog({
+      actorType: 'api_user',
+      action: 'DELETE_API_USER',
+      targetId: req.params.id,
+      targetType: 'api_user',
+      changes: { username: apiUser.username, email: apiUser.email },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.json({ message: 'API user deleted successfully' });
+  } catch (err) {
+    console.error('❌ Delete API user error:', err);
+    res.status(500).json({ message: 'Failed to delete API user' });
+  }
 });
 
 // GET API user stats
 router.get('/api-users/:id/stats', adminAuth, async (req, res) => {
-    try {
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            return res.status(400).json({ message: 'Invalid user ID format' });
-        }
-
-        const apiUser = await ApiUser.findById(req.params.id);
-        if (!apiUser) {
-            return res.status(404).json({ message: 'API user not found' });
-        }
-
-        const now = new Date();
-        const activeCount = apiUser.activeAttacks?.filter(a => new Date(a.expiresAt) > now).length || 0;
-
-        // Calculate rate limit usage
-        const lastMinute = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 60 * 1000).length || 0;
-        const lastHour = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 60 * 60 * 1000).length || 0;
-        const lastDay = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 24 * 60 * 60 * 1000).length || 0;
-
-        res.json({
-            username: apiUser.username,
-            status: apiUser.status,
-            limits: apiUser.limits,
-            totalRequests: apiUser.totalRequests || 0,
-            totalAttacks: apiUser.totalAttacks || 0,
-            currentActiveAttacks: activeCount,
-            currentRateLimits: {
-                lastMinute,
-                lastHour,
-                lastDay
-            },
-            activeAttacks: apiUser.activeAttacks
-                .filter(a => new Date(a.expiresAt) > now)
-                .map(a => ({
-                    attackId: a.attackId,
-                    target: a.target,
-                    port: a.port,
-                    startedAt: a.startedAt,
-                    expiresIn: Math.floor((new Date(a.expiresAt) - now) / 1000)
-                }))
-        });
-    } catch (err) {
-        console.error('❌ Get API user stats error:', err);
-        res.status(500).json({ message: 'Failed to fetch stats' });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user ID format' });
     }
+
+    const apiUser = await ApiUser.findById(req.params.id);
+    if (!apiUser) {
+      return res.status(404).json({ message: 'API user not found' });
+    }
+
+    const now = new Date();
+    const activeCount = apiUser.activeAttacks?.filter(a => new Date(a.expiresAt) > now).length || 0;
+
+    // Calculate rate limit usage
+    const lastMinute = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 60 * 1000).length || 0;
+    const lastHour = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 60 * 60 * 1000).length || 0;
+    const lastDay = apiUser.requestHistory?.filter(r => now - new Date(r.timestamp) < 24 * 60 * 60 * 1000).length || 0;
+
+    res.json({
+      username: apiUser.username,
+      status: apiUser.status,
+      limits: apiUser.limits,
+      totalRequests: apiUser.totalRequests || 0,
+      totalAttacks: apiUser.totalAttacks || 0,
+      currentActiveAttacks: activeCount,
+      currentRateLimits: {
+        lastMinute,
+        lastHour,
+        lastDay
+      },
+      activeAttacks: apiUser.activeAttacks
+        .filter(a => new Date(a.expiresAt) > now)
+        .map(a => ({
+          attackId: a.attackId,
+          target: a.target,
+          port: a.port,
+          startedAt: a.startedAt,
+          expiresIn: Math.floor((new Date(a.expiresAt) - now) / 1000)
+        }))
+    });
+  } catch (err) {
+    console.error('❌ Get API user stats error:', err);
+    res.status(500).json({ message: 'Failed to fetch stats' });
+  }
 });
 
 // ===== POST /api/admin/session — exchange secret for session token =====
 router.post('/session', async (req, res) => {
   if (!redisClient.isReady) {
     console.error('❌ Redis not connected');
-    return res.status(503).json({ message: 'Service temporarily unavailable. Please try again.' });
+    return sendEncryptedError(res, 503, 'Service temporarily unavailable. Please try again.');
   }
 
   const ip = req.ip;
@@ -518,10 +551,49 @@ router.post('/session', async (req, res) => {
       success: false,
       error: `IP locked for ${seconds}s`
     });
-    return res.status(429).json({ message: `Too many failed attempts. Try again in ${seconds}s.` });
+    return sendEncryptedError(res, 429, `Too many failed attempts. Try again in ${seconds}s.`);
   }
 
-  const { secret } = req.body;
+  let secret, captchaData;
+
+  // Handle encrypted request
+  if (req.body.encrypted && req.body.hash) {
+    try {
+      const decrypted = decryptData(req.body.encrypted);
+      const calculatedHash = createHash(decrypted);
+
+      if (calculatedHash !== req.body.hash) {
+        return sendEncryptedError(res, 400, 'Data integrity check failed');
+      }
+
+      const currentTime = Date.now();
+      const timeDiff = Math.abs(currentTime - decrypted.timestamp);
+      if (timeDiff > 5 * 60 * 1000) {
+        return sendEncryptedError(res, 400, 'Request expired. Please try again.');
+      }
+
+      secret = decrypted.secret;
+      captchaData = decrypted.captchaData;
+    } catch (err) {
+      return sendEncryptedError(res, 400, 'Invalid encrypted payload');
+    }
+  } else {
+    secret = req.body.secret;
+    captchaData = req.body.captchaData;
+  }
+
+  // Verify captcha
+  if (!captchaData) {
+    return sendEncryptedError(res, 400, 'Captcha verification required');
+  }
+
+  const captchaToken = captchaData.token || captchaData;
+  const captcha = await verifyCaptcha(captchaToken, null, ip);
+
+  if (!captcha.ok) {
+    console.log(`[Admin Login] Captcha failed: ${captcha.reason}`);
+    return sendEncryptedError(res, 400, captcha.reason || 'Captcha verification failed');
+  }
 
   if (!secret || typeof secret !== 'string' || secret !== process.env.ADMIN_SECRET) {
     record.count += 1;
@@ -539,12 +611,10 @@ router.post('/session', async (req, res) => {
         success: false,
         error: 'Max attempts exceeded, IP locked for 15 minutes'
       });
-      return res.status(429).json({ message: 'Too many failed attempts. IP locked for 15 minutes.' });
+      return sendEncryptedError(res, 429, 'Too many failed attempts. IP locked for 15 minutes.');
     }
 
-    return res.status(401).json({
-      message: `Invalid secret. ${MAX_ATTEMPTS - record.count} attempts remaining.`
-    });
+    return sendEncryptedError(res, 401, `Invalid secret. ${MAX_ATTEMPTS - record.count} attempts remaining.`);
   }
 
   failedAttempts.delete(ip);
@@ -567,10 +637,14 @@ router.post('/session', async (req, res) => {
       userAgent: req.headers['user-agent'],
       success: true
     });
-    res.json({ token, expiresIn: SESSION_TTL * 1000 });
+
+    const responseData = { token, expiresIn: SESSION_TTL * 1000 };
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+    res.json({ encrypted: encryptedResponse, hash: responseHash });
   } catch (err) {
     console.error('❌ Redis error:', err);
-    return res.status(500).json({ message: 'Session storage failed' });
+    return sendEncryptedError(res, 500, 'Session storage failed');
   }
 });
 
@@ -682,39 +756,42 @@ router.get('/daily-reset-status', adminAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 router.get('/stats', adminAuth, async (req, res) => {
-  try {
-    const [total, proUsers, freeUsers, withCredits, today, totalResellers, activeResellers] =
-      await Promise.all([
-        User.countDocuments(),
-        User.countDocuments({
-          'subscription.type': 'pro',
-          'subscription.expiresAt': { $gt: new Date() }
-        }),
-        User.countDocuments({ 'subscription.type': 'free' }),
-        User.countDocuments({ credits: { $gt: 0 } }),
-        User.countDocuments({ createdAt: { $gte: new Date(Date.now() - 86400000) } }),
-        Reseller.countDocuments(),
-        Reseller.countDocuments({ isBlocked: false })
-      ]);
+    try {
+        const [total, proUsers, freeUsers, withCredits, today, totalResellers, activeResellers] =
+            await Promise.all([
+                User.countDocuments(),
+                User.countDocuments({
+                    'subscription.type': 'pro',
+                    'subscription.expiresAt': { $gt: new Date() }
+                }),
+                User.countDocuments({ 'subscription.type': 'free' }),
+                User.countDocuments({ credits: { $gt: 0 } }),
+                User.countDocuments({ createdAt: { $gte: new Date(Date.now() - 86400000) } }),
+                Reseller.countDocuments(),
+                Reseller.countDocuments({ isBlocked: false })
+            ]);
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const attacksToday = await User.aggregate([
-      { $match: { 'dailyAttacks.date': { $gte: todayStart } } },
-      { $group: { _id: null, total: { $sum: '$dailyAttacks.count' } } }
-    ]);
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const attacksToday = await User.aggregate([
+            { $match: { 'dailyAttacks.date': { $gte: todayStart } } },
+            { $group: { _id: null, total: { $sum: '$dailyAttacks.count' } } }
+        ]);
 
-    res.json({
-      total, pro: proUsers, free: freeUsers,
-      withCredits, today, totalResellers, activeResellers,
-      attacksToday: attacksToday[0]?.total || 0
-    });
-  } catch (err) {
-    console.error('❌ Stats error:', err);
-    res.status(500).json({ message: 'Failed to fetch stats' });
-  }
+        const statsData = {
+            total, pro: proUsers, free: freeUsers,
+            withCredits, today, totalResellers, activeResellers,
+            attacksToday: attacksToday[0]?.total || 0
+        };
+        
+        const encryptedResponse = encryptResponse(statsData);
+        const responseHash = createHash(statsData);
+        res.json({ encrypted: encryptedResponse, hash: responseHash });
+    } catch (err) {
+        console.error('❌ Stats error:', err);
+        sendEncryptedError(res, 500, 'Failed to fetch stats');
+    }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 //  USER ROUTES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -736,8 +813,8 @@ router.get('/users', adminAuth, async (req, res) => {
       conditions.push({
         $or: [
           { username: { $regex: search, $options: 'i' } },
-          { email:    { $regex: search, $options: 'i' } },
-          { userId:   { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { userId: { $regex: search, $options: 'i' } },
         ]
       });
     }
@@ -786,11 +863,11 @@ router.get('/users', adminAuth, async (req, res) => {
         ...user,
         isPro: isProActive,
         subscriptionStatus: {
-          active:    isProActive,
-          daysLeft:  user.subscription?.expiresAt
+          active: isProActive,
+          daysLeft: user.subscription?.expiresAt
             ? Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / 86400000)
             : 0,
-          plan:      user.subscription?.plan || 'none',
+          plan: user.subscription?.plan || 'none',
           expiresAt: user.subscription?.expiresAt
         },
         remainingAttacks: isProActive
@@ -1277,9 +1354,9 @@ router.post('/users/:id/reset-daily', adminAuth, async (req, res) => {
 router.get('/plans', adminAuth, async (req, res) => {
   res.json({
     plans: [
-      { id: 'week',   name: 'Weekly Plan',  displayName: '7 Days Pro',  days: 7,  price: 850,  priceINR: '₹850',  dailyAttacks: 30, maxDuration: 300, description: 'Perfect for testing',  features: ['30 attacks per day', '300s max duration', 'Priority support'] },
-      { id: 'month',  name: 'Monthly Plan', displayName: '30 Days Pro', days: 30, price: 1800, priceINR: '₹1800', dailyAttacks: 30, maxDuration: 300, description: 'Most popular',          features: ['30 attacks per day', '300s max duration', 'Priority support', 'Best value'] },
-      { id: 'season', name: 'Season Plan',  displayName: '60 Days Pro', days: 60, price: 2500, priceINR: '₹2500', dailyAttacks: 30, maxDuration: 300, description: 'Best value',            features: ['30 attacks per day', '300s max duration', 'Priority support', 'Save 35%'] }
+      { id: 'week', name: 'Weekly Plan', displayName: '7 Days Pro', days: 7, price: 850, priceINR: '₹850', dailyAttacks: 30, maxDuration: 300, description: 'Perfect for testing', features: ['30 attacks per day', '300s max duration', 'Priority support'] },
+      { id: 'month', name: 'Monthly Plan', displayName: '30 Days Pro', days: 30, price: 1800, priceINR: '₹1800', dailyAttacks: 30, maxDuration: 300, description: 'Most popular', features: ['30 attacks per day', '300s max duration', 'Priority support', 'Best value'] },
+      { id: 'season', name: 'Season Plan', displayName: '60 Days Pro', days: 60, price: 2500, priceINR: '₹2500', dailyAttacks: 30, maxDuration: 300, description: 'Best value', features: ['30 attacks per day', '300s max duration', 'Priority support', 'Save 35%'] }
     ]
   });
 });
@@ -1302,7 +1379,7 @@ router.get('/resellers', adminAuth, async (req, res) => {
     if (search.length > 0) {
       query.$or = [
         { username: { $regex: search, $options: 'i' } },
-        { email:    { $regex: search, $options: 'i' } }
+        { email: { $regex: search, $options: 'i' } }
       ];
     }
     if (isBlocked !== undefined) query.isBlocked = isBlocked === 'true';
@@ -1471,49 +1548,49 @@ router.get('/resellers/:id/stats', adminAuth, async (req, res) => {
 
     // ✅ FIX 1 applied: actorId is now an ObjectId — matches what was stored by reseller.js
     const giveEvents = await AuditLog.find({
-      actorId:   resellerId,   // <-- was req.params.id (string). Now ObjectId. This was the main bug.
+      actorId: resellerId,   // <-- was req.params.id (string). Now ObjectId. This was the main bug.
       actorType: 'reseller',
-      action:    'RESELLER_GIVE_PRO',
-      success:   true
+      action: 'RESELLER_GIVE_PRO',
+      success: true
     }).sort({ createdAt: -1 }).lean();
 
     // ── Aggregate totals ───────────────────────────────────────────────────
-    let totalRevenue      = 0;
-    let totalProfit       = 0;
+    let totalRevenue = 0;
+    let totalProfit = 0;
     let totalCreditsSpent = 0;
 
     const planBreakdown = {
-      week:   { sales: 0, revenue: 0, profit: 0, cost: 0 },
-      month:  { sales: 0, revenue: 0, profit: 0, cost: 0 },
+      week: { sales: 0, revenue: 0, profit: 0, cost: 0 },
+      month: { sales: 0, revenue: 0, profit: 0, cost: 0 },
       season: { sales: 0, revenue: 0, profit: 0, cost: 0 }
     };
     const uniqueCustomers = new Set();
-    const dailySalesMap   = new Map();
+    const dailySalesMap = new Map();
     const monthlySalesMap = new Map();
 
     giveEvents.forEach(event => {
-      const c             = event.changes || {};
-      const plan          = (c.plan || '').toLowerCase();
-      const creditsUsed   = c.creditsUsed   || 0;
+      const c = event.changes || {};
+      const plan = (c.plan || '').toLowerCase();
+      const creditsUsed = c.creditsUsed || 0;
       const customerPrice = c.customerPrice || 0;
-      const profit        = c.profit        || 0;
+      const profit = c.profit || 0;
 
-      totalRevenue      += customerPrice;
-      totalProfit       += profit;
+      totalRevenue += customerPrice;
+      totalProfit += profit;
       totalCreditsSpent += creditsUsed;
 
       if (planBreakdown[plan]) {
         planBreakdown[plan].sales++;
         planBreakdown[plan].revenue += customerPrice;
-        planBreakdown[plan].profit  += profit;
-        planBreakdown[plan].cost    += creditsUsed;
+        planBreakdown[plan].profit += profit;
+        planBreakdown[plan].cost += creditsUsed;
       }
 
       if (event.targetId) uniqueCustomers.add(event.targetId.toString());
 
-      const date  = new Date(event.createdAt).toISOString().split('T')[0];
+      const date = new Date(event.createdAt).toISOString().split('T')[0];
       const month = date.slice(0, 7);
-      dailySalesMap.set(date,  (dailySalesMap.get(date)    || 0) + customerPrice);
+      dailySalesMap.set(date, (dailySalesMap.get(date) || 0) + customerPrice);
       monthlySalesMap.set(month, (monthlySalesMap.get(month) || 0) + customerPrice);
     });
 
@@ -1531,36 +1608,36 @@ router.get('/resellers/:id/stats', adminAuth, async (req, res) => {
 
       const customerEvents = giveEvents.filter(e => e.targetId?.toString() === customerId);
       return {
-        id:             user._id,
-        username:       user.username,
-        email:          user.email,
-        userId:         user.userId,
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        userId: user.userId,
         totalPurchases: customerEvents.length,
-        totalSpent:     customerEvents.reduce((s, e) => s + (e.changes?.customerPrice || 0), 0),
-        totalProfit:    customerEvents.reduce((s, e) => s + (e.changes?.profit        || 0), 0),
-        lastPurchase:   customerEvents[0]?.createdAt || null
+        totalSpent: customerEvents.reduce((s, e) => s + (e.changes?.customerPrice || 0), 0),
+        totalProfit: customerEvents.reduce((s, e) => s + (e.changes?.profit || 0), 0),
+        lastPurchase: customerEvents[0]?.createdAt || null
       };
     }).filter(Boolean).sort((a, b) => b.totalSpent - a.totalSpent);
 
     // ── Recent activity — ✅ FIX 3: same cast for recent activity user lookup
-    const recentSlice     = giveEvents.slice(0, 20);
+    const recentSlice = giveEvents.slice(0, 20);
     const recentTargetIds = [...new Set(
       recentSlice.map(e => e.targetId?.toString()).filter(Boolean)
     )].map(id => new mongoose.Types.ObjectId(id));  // <-- was plain strings
 
-    const recentUsers   = await User.find({ _id: { $in: recentTargetIds } })
+    const recentUsers = await User.find({ _id: { $in: recentTargetIds } })
       .select('username email').lean();
     const recentUserMap = Object.fromEntries(recentUsers.map(u => [u._id.toString(), u]));
 
     const recentActivity = recentSlice.map(event => ({
-      id:            event._id,
-      plan:          event.changes?.plan,
-      days:          event.changes?.days,
-      creditsUsed:   event.changes?.creditsUsed,
+      id: event._id,
+      plan: event.changes?.plan,
+      days: event.changes?.days,
+      creditsUsed: event.changes?.creditsUsed,
       customerPrice: event.changes?.customerPrice,
-      profit:        event.changes?.profit,
-      user:          event.targetId ? (recentUserMap[event.targetId.toString()] || null) : null,
-      timestamp:     event.createdAt
+      profit: event.changes?.profit,
+      user: event.targetId ? (recentUserMap[event.targetId.toString()] || null) : null,
+      timestamp: event.createdAt
     }));
 
     // ── Charts ─────────────────────────────────────────────────────────────
@@ -1574,39 +1651,39 @@ router.get('/resellers/:id/stats', adminAuth, async (req, res) => {
       .sort((a, b) => a.month.localeCompare(b.month));
 
     // ── ROI & averages ─────────────────────────────────────────────────────
-    const totalInvestment  = reseller.totalGiven || totalCreditsSpent;
-    const roi              = totalInvestment > 0
+    const totalInvestment = reseller.totalGiven || totalCreditsSpent;
+    const roi = totalInvestment > 0
       ? Number(((totalProfit / totalInvestment) * 100).toFixed(1)) : 0;
     const avgProfitPerSale = giveEvents.length > 0
       ? Number((totalProfit / giveEvents.length).toFixed(2)) : 0;
-    const accountAgeDays   = Math.floor(
+    const accountAgeDays = Math.floor(
       (Date.now() - new Date(reseller.createdAt)) / (1000 * 60 * 60 * 24)
     );
 
     res.json({
       reseller: {
-        id:         reseller._id,
-        username:   reseller.username,
-        email:      reseller.email,
-        credits:    reseller.credits,
+        id: reseller._id,
+        username: reseller.username,
+        email: reseller.email,
+        credits: reseller.credits,
         totalGiven: reseller.totalGiven,
-        isBlocked:  reseller.isBlocked,
-        createdAt:  reseller.createdAt,
-        lastLogin:  reseller.lastLogin
+        isBlocked: reseller.isBlocked,
+        createdAt: reseller.createdAt,
+        lastLogin: reseller.lastLogin
       },
       statistics: {
-        totalSales:           giveEvents.length,
-        totalCustomers:       uniqueCustomers.size,
+        totalSales: giveEvents.length,
+        totalCustomers: uniqueCustomers.size,
         totalRevenue,
         totalProfit,
         totalCreditsSpent,
         averageProfitPerSale: avgProfitPerSale,
         roi,
-        accountAge:           accountAgeDays
+        accountAge: accountAgeDays
       },
       planBreakdown,
       charts: {
-        dailySales:   dailySalesArray,
+        dailySales: dailySalesArray,
         monthlySales: monthlySalesArray
       },
       topCustomers,
@@ -1624,24 +1701,24 @@ router.get('/resellers/all-stats', adminAuth, async (req, res) => {
   try {
     const resellers = await Reseller.find().select('-password').lean();
 
-    const totalResellers  = resellers.length;
+    const totalResellers = resellers.length;
     const activeResellers = resellers.filter(r => !r.isBlocked).length;
     const totalCreditsAcrossResellers = resellers.reduce((s, r) => s + (r.credits || 0), 0);
-    const totalGivenAcrossResellers   = resellers.reduce((s, r) => s + (r.totalGiven || 0), 0);
+    const totalGivenAcrossResellers = resellers.reduce((s, r) => s + (r.totalGiven || 0), 0);
 
     const allGiveEvents = await AuditLog.find({
       actorType: 'reseller',
-      action:    'RESELLER_GIVE_PRO',
-      success:   true
+      action: 'RESELLER_GIVE_PRO',
+      success: true
     }).lean();
 
     let totalSales = allGiveEvents.length;
     let totalRevenue = 0;
-    let totalProfit  = 0;
+    let totalProfit = 0;
     allGiveEvents.forEach(event => {
       if (event.changes) {
         totalRevenue += event.changes.customerPrice || 0;
-        totalProfit  += event.changes.profit        || 0;
+        totalProfit += event.changes.profit || 0;
       }
     });
 
@@ -1651,7 +1728,7 @@ router.get('/resellers/all-stats', adminAuth, async (req, res) => {
       if (id) resellerSalesCount.set(id, (resellerSalesCount.get(id) || 0) + 1);
     });
 
-    let topResellerId    = null;
+    let topResellerId = null;
     let topResellerSales = 0;
     for (const [id, sales] of resellerSalesCount.entries()) {
       if (sales > topResellerSales) { topResellerSales = sales; topResellerId = id; }
@@ -1666,18 +1743,18 @@ router.get('/resellers/all-stats', adminAuth, async (req, res) => {
       summary: {
         totalResellers,
         activeResellers,
-        blockedResellers:         totalResellers - activeResellers,
-        totalCreditsInSystem:     totalCreditsAcrossResellers,
-        totalCreditsGiven:        totalGivenAcrossResellers,
+        blockedResellers: totalResellers - activeResellers,
+        totalCreditsInSystem: totalCreditsAcrossResellers,
+        totalCreditsGiven: totalGivenAcrossResellers,
         totalSales,
         totalRevenue,
         totalProfit,
         averageProfitPerReseller: totalResellers > 0 ? totalProfit / totalResellers : 0,
-        averageSalesPerReseller:  totalResellers > 0 ? totalSales  / totalResellers : 0
+        averageSalesPerReseller: totalResellers > 0 ? totalSales / totalResellers : 0
       },
       topReseller: topReseller ? {
-        username:   topReseller.username,
-        email:      topReseller.email,
+        username: topReseller.username,
+        email: topReseller.email,
         totalSales: topResellerSales
       } : null,
       resellers: resellers.map(r => ({
@@ -1698,12 +1775,12 @@ router.get('/resellers/all-stats', adminAuth, async (req, res) => {
 
 router.get('/audit-logs', adminAuth, async (req, res) => {
   try {
-    let page  = parseInt(req.query.page)  || 1;
+    let page = parseInt(req.query.page) || 1;
     let limit = parseInt(req.query.limit) || 50;
     if (page < 1) page = 1;
     if (limit < 1 || limit > 100) limit = 50;
 
-    const total      = await AuditLog.countDocuments();
+    const total = await AuditLog.countDocuments();
     const totalPages = Math.ceil(total / limit);
     if (page > totalPages && totalPages > 0) page = totalPages;
 

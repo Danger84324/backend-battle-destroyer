@@ -1,46 +1,92 @@
-// routes/reseller.js (Updated for subscription system)
+// routes/reseller.js (Updated with encryption and CAPTCHA)
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = require('express-rate-limit');
+const CryptoJS = require('crypto-js');
 const Reseller = require('../models/Reseller');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const validation = require('../utils/validation');
 const { createAuditLog } = require('../utils/audit');
+const { verifyCaptcha } = require('./captcha'); // Import CAPTCHA verification
+
+// Encryption configuration
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-key-2024-battle-destroyer';
+
+/* ─── Encryption Helpers ──────────────────────────────────────── */
+function decryptData(encryptedData) {
+  try {
+    const bytes = CryptoJS.AES.decrypt(encryptedData, ENCRYPTION_KEY);
+    const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+    if (!decrypted) throw new Error('Decryption failed');
+    return JSON.parse(decrypted);
+  } catch (error) {
+    console.error('Decryption error:', error);
+    throw new Error('Invalid encrypted data');
+  }
+}
+
+function encryptResponse(data) {
+  const jsonString = JSON.stringify(data);
+  return CryptoJS.AES.encrypt(jsonString, ENCRYPTION_KEY).toString();
+}
+
+function verifyHash(data, receivedHash) {
+  const jsonString = JSON.stringify(data);
+  const calculatedHash = CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
+  return calculatedHash === receivedHash;
+}
+
+function createHash(data) {
+  const jsonString = JSON.stringify(data);
+  return CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
+}
+
+function sendEncryptedError(res, statusCode, message) {
+  const errorResponse = { success: false, message };
+  const encryptedError = encryptResponse(errorResponse);
+  const errorHash = createHash(errorResponse);
+  return res.status(statusCode).json({ encrypted: encryptedError, hash: errorHash });
+}
+
+// Helper to get IP
+function getIp(req) {
+  const raw = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || '';
+  let ip = raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+  if (ip === '::1') ip = '127.0.0.1';
+  return ip;
+}
 
 // ── PLAN DEFINITIONS ──
-// These match exactly with frontend PLANS array
-// Credits = wholesale cost to reseller (₹1 per credit)
-// Customer price = fixed selling price in INR
 const PLANS = [
   {
     label: 'Week',
     days: 7,
-    credits: 200,        // Cost to reseller in credits (₹200)
-    customerPrice: 850,  // Fixed selling price (₹850)
+    credits: 200,
+    customerPrice: 850,
     displayName: 'Weekly Pro (7 days)',
-    profit: 650,         // 850 - 200
+    profit: 650,
     multiplier: 4.25
   },
   {
     label: 'Month',
     days: 30,
-    credits: 400,        // Cost to reseller in credits (₹400)
-    customerPrice: 1800, // Fixed selling price (₹1800)
+    credits: 400,
+    customerPrice: 1800,
     displayName: 'Monthly Pro (30 days)',
-    profit: 1400,        // 1800 - 400
+    profit: 1400,
     multiplier: 4.5
   },
   {
     label: 'Season',
-    days: 90,            // 90 days as per your frontend
-    credits: 800,        // Cost to reseller in credits (₹800)
-    customerPrice: 2500, // Fixed selling price (₹2500)
+    days: 90,
+    credits: 800,
+    customerPrice: 2500,
     displayName: 'Season Pro (90 days)',
-    profit: 1700,        // 2500 - 800
+    profit: 1700,
     multiplier: 3.125
   },
 ];
@@ -63,6 +109,14 @@ const actionLimiter = rateLimit({
   validate: { trustProxy: false, xForwardedForHeader: false }
 });
 
+const resellerSearchLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 20,
+  message: { message: 'Too many search attempts. Please wait 1 minute before trying again.' },
+  keyGenerator: (req) => `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`,
+  validate: { trustProxy: false, xForwardedForHeader: false }
+});
+
 // ===== BRUTE FORCE MAP FOR LOGIN =====
 const loginAttempts = new Map();
 const MAX_LOGIN = 5;
@@ -80,14 +134,14 @@ function resellerAuth(req, res, next) {
   const auth = req.headers['authorization'];
 
   if (!auth || typeof auth !== 'string' || !auth.startsWith('Bearer ')) {
-    return res.status(401).json({ message: 'Unauthorized' });
+    return sendEncryptedError(res, 401, 'Unauthorized');
   }
 
   try {
     const token = auth.slice(7);
 
     if (!token || token.length < 20) {
-      return res.status(401).json({ message: 'Invalid token format' });
+      return sendEncryptedError(res, 401, 'Invalid token format');
     }
 
     const decoded = jwt.verify(
@@ -96,7 +150,7 @@ function resellerAuth(req, res, next) {
     );
 
     if (decoded.role !== 'reseller' || !validation.validateObjectId(decoded.id)) {
-      return res.status(403).json({ message: 'Forbidden' });
+      return sendEncryptedError(res, 403, 'Forbidden');
     }
 
     req.resellerId = decoded.id;
@@ -104,26 +158,14 @@ function resellerAuth(req, res, next) {
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ message: 'Token expired' });
+      return sendEncryptedError(res, 401, 'Token expired');
     }
-    return res.status(401).json({ message: 'Invalid or expired token' });
+    return sendEncryptedError(res, 401, 'Invalid or expired token');
   }
 }
-
-const resellerSearchLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 20, // 20 searches per minute max (prevents user enumeration)
-  message: { message: 'Too many search attempts. Please wait 1 minute before trying again.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`,
-  validate: { trustProxy: false, xForwardedForHeader: false },
-  skipSuccessfulRequests: false // Count both successful and failed searches
-});
-
-// ===== POST /api/reseller/login =====
+// ===== POST /api/reseller/login (Updated with encryption and CAPTCHA) =====
 router.post('/login', loginLimiter, async (req, res) => {
-  const ip = req.ip;
+  const ip = getIp(req);
   const now = Date.now();
   const record = loginAttempts.get(ip) || { count: 0, lockedUntil: 0 };
 
@@ -139,28 +181,70 @@ router.post('/login', loginLimiter, async (req, res) => {
       error: `IP locked for ${seconds}s`
     });
 
-    return res.status(429).json({
-      message: `Account locked. Try again in ${seconds}s.`
-    });
-  }
-
-  const { username, password } = req.body;
-
-  if (!username || typeof username !== 'string') {
-    return res.status(400).json({ message: 'Username is required' });
-  }
-
-  if (!password || typeof password !== 'string') {
-    return res.status(400).json({ message: 'Password is required' });
-  }
-
-  const sanitizedUsername = validation.sanitizeString(username.trim(), 100);
-
-  if (sanitizedUsername.length < 3) {
-    return res.status(400).json({ message: 'Invalid credentials' });
+    return sendEncryptedError(res, 429, `Account locked. Try again in ${seconds}s.`);
   }
 
   try {
+    // Check if request is encrypted
+    const { encrypted, hash } = req.body;
+
+    if (!encrypted || !hash) {
+      return sendEncryptedError(res, 400, 'Encrypted data required');
+    }
+
+    let decryptedData;
+    try {
+      decryptedData = decryptData(encrypted);
+    } catch (err) {
+      return sendEncryptedError(res, 400, 'Invalid encrypted payload');
+    }
+
+    if (!verifyHash(decryptedData, hash)) {
+      return sendEncryptedError(res, 400, 'Data integrity check failed');
+    }
+
+    const currentTime = Date.now();
+    const timeDiff = Math.abs(currentTime - decryptedData.timestamp);
+    if (timeDiff > 5 * 60 * 1000) {
+      return sendEncryptedError(res, 400, 'Request expired. Please try again.');
+    }
+
+    const { username, password, captchaData, hp } = decryptedData;
+
+    // Honeypot check
+    if (hp) {
+      return sendEncryptedError(res, 400, 'Invalid request');
+    }
+
+    if (!username || typeof username !== 'string') {
+      return sendEncryptedError(res, 400, 'Username is required');
+    }
+
+    if (!password || typeof password !== 'string') {
+      return sendEncryptedError(res, 400, 'Password is required');
+    }
+
+    if (!captchaData) {
+      return sendEncryptedError(res, 400, 'Captcha verification required');
+    }
+
+    // Verify CAPTCHA
+    const captchaToken = captchaData.token || captchaData;
+    const captcha = await verifyCaptcha(captchaToken, null, ip);
+
+    if (!captcha.ok) {
+      console.log(`[Reseller Login] Captcha failed for ${username}: ${captcha.reason}`);
+      return sendEncryptedError(res, 400, captcha.reason || 'Captcha verification failed');
+    }
+
+    console.log(`[Reseller Login] Captcha passed for ${username}`);
+
+    const sanitizedUsername = validation.sanitizeString(username.trim(), 100);
+
+    if (sanitizedUsername.length < 3) {
+      return sendEncryptedError(res, 400, 'Invalid credentials');
+    }
+
     const reseller = await Reseller.findOne({
       $or: [
         { username: sanitizedUsername },
@@ -184,13 +268,11 @@ router.post('/login', loginLimiter, async (req, res) => {
           error: 'Max login attempts exceeded'
         });
 
-        return res.status(429).json({
-          message: 'Too many failed attempts. IP locked for 15 minutes.'
-        });
+        return sendEncryptedError(res, 429, 'Too many failed attempts. IP locked for 15 minutes.');
       }
 
       loginAttempts.set(ip, record);
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return sendEncryptedError(res, 401, 'Invalid credentials');
     }
 
     const isPasswordValid = await bcrypt.compare(password, reseller.password);
@@ -211,13 +293,11 @@ router.post('/login', loginLimiter, async (req, res) => {
           error: `Max attempts exceeded for reseller ${reseller._id}`
         });
 
-        return res.status(429).json({
-          message: 'Too many failed attempts. IP locked for 15 minutes.'
-        });
+        return sendEncryptedError(res, 429, 'Too many failed attempts. IP locked for 15 minutes.');
       }
 
       loginAttempts.set(ip, record);
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return sendEncryptedError(res, 401, 'Invalid credentials');
     }
 
     if (reseller.isBlocked) {
@@ -232,9 +312,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         error: 'Account is blocked'
       });
 
-      return res.status(403).json({
-        message: 'Your reseller account has been blocked. Contact admin.'
-      });
+      return sendEncryptedError(res, 403, 'Your reseller account has been blocked. Contact admin.');
     }
 
     loginAttempts.delete(ip);
@@ -257,7 +335,8 @@ router.post('/login', loginLimiter, async (req, res) => {
       success: true
     });
 
-    res.json({
+    const responseData = {
+      success: true,
       token,
       expiresIn: 12 * 60 * 60 * 1000,
       reseller: {
@@ -266,8 +345,18 @@ router.post('/login', loginLimiter, async (req, res) => {
         email: reseller.email,
         credits: reseller.credits,
         totalGiven: reseller.totalGiven,
-      }
+      },
+      timestamp: Date.now()
+    };
+
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+
+    return res.json({
+      encrypted: encryptedResponse,
+      hash: responseHash,
     });
+
   } catch (err) {
     console.error('❌ Login error:', err);
 
@@ -280,11 +369,11 @@ router.post('/login', loginLimiter, async (req, res) => {
       error: err.message
     });
 
-    res.status(500).json({ message: 'Server error' });
+    return sendEncryptedError(res, 500, 'Server error');
   }
 });
 
-// ===== GET /api/reseller/me =====
+// ===== GET /api/reseller/me (Updated with encryption) =====
 router.get('/me', resellerAuth, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId)
@@ -292,36 +381,45 @@ router.get('/me', resellerAuth, async (req, res) => {
       .lean();
 
     if (!reseller) {
-      return res.status(404).json({ message: 'Reseller not found' });
+      return sendEncryptedError(res, 404, 'Reseller not found');
     }
 
     if (reseller.isBlocked) {
-      return res.status(403).json({ message: 'Account has been blocked' });
+      return sendEncryptedError(res, 403, 'Account has been blocked');
     }
 
-    res.json(reseller);
+    const responseData = {
+      ...reseller,
+      timestamp: Date.now()
+    };
+
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+
+    return res.json({
+      encrypted: encryptedResponse,
+      hash: responseHash,
+    });
   } catch (err) {
     console.error('❌ Get me error:', err);
-    res.status(500).json({ message: 'Server error' });
+    return sendEncryptedError(res, 500, 'Server error');
   }
 });
 
-// ===== GET /api/reseller/search-user =====
+// ===== GET /api/reseller/search-user (Updated with encryption) =====
 router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
 
     if (!reseller || reseller.isBlocked) {
-      return res.status(403).json({ message: 'Account is not active' });
+      return sendEncryptedError(res, 403, 'Account is not active');
     }
 
     const { query } = req.query;
     const searchQuery = validation.sanitizeSearch(query, 100);
 
     if (!searchQuery) {
-      return res.status(400).json({
-        message: 'Search query must be at least 3 characters'
-      });
+      return sendEncryptedError(res, 400, 'Search query must be at least 3 characters');
     }
 
     let searchFilter;
@@ -336,10 +434,9 @@ router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res)
     ).lean();
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return sendEncryptedError(res, 404, 'User not found');
     }
 
-    // Add computed subscription status
     const isProActive = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
     let subscriptionStatus = null;
 
@@ -362,10 +459,19 @@ router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res)
       success: true
     });
 
-    res.json({
+    const responseData = {
       ...user,
       isPro: isProActive,
-      subscriptionStatus
+      subscriptionStatus,
+      timestamp: Date.now()
+    };
+
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+
+    return res.json({
+      encrypted: encryptedResponse,
+      hash: responseHash,
     });
   } catch (err) {
     console.error('❌ Search user error:', err);
@@ -380,7 +486,7 @@ router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res)
       error: err.message
     });
 
-    res.status(500).json({ message: 'Server error' });
+    return sendEncryptedError(res, 500, 'Server error');
   }
 });
 
@@ -388,37 +494,56 @@ router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res)
 // Gives Pro subscription to user, deducts credits from reseller
 router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
   try {
-    const reseller = await Reseller.findById(req.resellerId);
-    if (!reseller || reseller.isBlocked) {
-      return res.status(403).json({ message: 'Account is not active' });
+    // Check if request is encrypted
+    let requestData = req.body;
+
+    // Handle encrypted request
+    if (req.body.encrypted && req.body.hash) {
+      try {
+        const decryptedData = decryptData(req.body.encrypted);
+
+        if (!verifyHash(decryptedData, req.body.hash)) {
+          return sendEncryptedError(res, 400, 'Data integrity check failed');
+        }
+
+        const currentTime = Date.now();
+        const timeDiff = Math.abs(currentTime - decryptedData.timestamp);
+        if (timeDiff > 5 * 60 * 1000) {
+          return sendEncryptedError(res, 400, 'Request expired. Please try again.');
+        }
+
+        requestData = decryptedData;
+      } catch (err) {
+        return sendEncryptedError(res, 400, 'Invalid encrypted payload');
+      }
     }
 
-    const { userId, planLabel } = req.body;
+    const reseller = await Reseller.findById(req.resellerId);
+    if (!reseller || reseller.isBlocked) {
+      return sendEncryptedError(res, 403, 'Account is not active');
+    }
+
+    const { userId, planLabel } = requestData;
+
+    console.log('Give Pro Request Data:', { userId, planLabel }); // Debug log
 
     if (!userId || typeof userId !== 'string') {
-      return res.status(400).json({ message: 'userId is required' });
+      return sendEncryptedError(res, 400, 'userId is required');
     }
 
     if (!planLabel || typeof planLabel !== 'string') {
-      return res.status(400).json({ message: 'Plan label is required' });
+      return sendEncryptedError(res, 400, 'Plan label is required');
     }
 
     // Validate plan
     const plan = PLANS.find(p => p.label.toLowerCase() === planLabel.toLowerCase());
     if (!plan) {
-      return res.status(400).json({
-        message: `Invalid plan. Choose from: ${PLANS.map(p => p.label).join(', ')}`,
-        plans: PLANS.map(p => ({ label: p.label, days: p.days, credits: p.credits, customerPrice: p.customerPrice }))
-      });
+      return sendEncryptedError(res, 400, `Invalid plan. Choose from: ${PLANS.map(p => p.label).join(', ')}`);
     }
 
     // Check if reseller has enough credits
     if (reseller.credits < plan.credits) {
-      return res.status(400).json({
-        message: `Insufficient credits. You have ${reseller.credits}, plan requires ${plan.credits} credits.`,
-        needed: plan.credits,
-        available: reseller.credits
-      });
+      return sendEncryptedError(res, 400, `Insufficient credits. You have ${reseller.credits}, plan requires ${plan.credits} credits.`);
     }
 
     const sanitizedUserId = validation.sanitizeString(userId.trim(), 100);
@@ -427,7 +552,7 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     });
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return sendEncryptedError(res, 404, 'User not found');
     }
 
     // Get old subscription info for audit
@@ -437,12 +562,29 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
       expiresAt: user.subscription.expiresAt
     } : null;
 
-    // Give Pro subscription to user using the addProSubscription method
-    // Note: Make sure your User model has this method
-    const daysAdded = user.addProSubscription ?
-      user.addProSubscription(plan.label.toLowerCase(), plan.days) :
-      await giveProSubscriptionDirect(user, plan.label, plan.days);
+    // Give Pro subscription to user
+    const now = new Date();
+    const newExpiry = new Date(now.getTime() + plan.days * 24 * 60 * 60 * 1000);
 
+    // Check if user already has active pro subscription
+    if (user.subscription?.type === 'pro' && user.subscription?.expiresAt > now) {
+      // Extend existing subscription
+      const currentExpiry = new Date(user.subscription.expiresAt);
+      const extendedExpiry = new Date(currentExpiry.getTime() + plan.days * 24 * 60 * 60 * 1000);
+      user.subscription.expiresAt = extendedExpiry;
+      user.subscription.plan = plan.label.toLowerCase();
+    } else {
+      // Create new subscription
+      user.subscription = {
+        type: 'pro',
+        plan: plan.label.toLowerCase(),
+        expiresAt: newExpiry,
+        attacksPerDay: 30,
+        startedAt: now
+      };
+    }
+
+    user.isPro = true;
     await user.save();
 
     // Deduct credits from reseller
@@ -481,7 +623,7 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
       success: true
     });
 
-    res.json({
+    const responseData = {
       message: `✅ ${plan.displayName} (${plan.days} days) successfully given to ${user.username}! They now have Pro access.`,
       plan: plan.label,
       daysGiven: plan.days,
@@ -495,7 +637,16 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
         email: user.email,
         isPro: isProActive,
         subscription: subscriptionStatus
-      }
+      },
+      timestamp: Date.now()
+    };
+
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+
+    return res.json({
+      encrypted: encryptedResponse,
+      hash: responseHash,
     });
   } catch (err) {
     console.error('❌ Give pro error:', err);
@@ -510,27 +661,29 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
       error: err.message
     });
 
-    res.status(500).json({ message: 'Server error: ' + err.message });
+    return sendEncryptedError(res, 500, 'Server error: ' + err.message);
   }
 });
 
-// Helper function to give pro subscription directly if model method doesn't exist
+// Helper function
 async function giveProSubscriptionDirect(user, planLabel, days) {
   const now = new Date();
   const newExpiry = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
 
-  // Check if user already has active pro subscription
+  // In routes/reseller.js - Update the give-pro route
+
+  // When creating/updating the subscription, ensure the plan is lowercase
   if (user.subscription?.type === 'pro' && user.subscription?.expiresAt > now) {
     // Extend existing subscription
     const currentExpiry = new Date(user.subscription.expiresAt);
-    const extendedExpiry = new Date(currentExpiry.getTime() + days * 24 * 60 * 60 * 1000);
+    const extendedExpiry = new Date(currentExpiry.getTime() + plan.days * 24 * 60 * 60 * 1000);
     user.subscription.expiresAt = extendedExpiry;
-    user.subscription.plan = planLabel;
+    user.subscription.plan = plan.label.toLowerCase(); // ✅ Convert to lowercase
   } else {
     // Create new subscription
     user.subscription = {
       type: 'pro',
-      plan: planLabel,
+      plan: plan.label.toLowerCase(), // ✅ Convert to lowercase
       expiresAt: newExpiry,
       attacksPerDay: 30,
       startedAt: now
@@ -541,16 +694,15 @@ async function giveProSubscriptionDirect(user, planLabel, days) {
   return days;
 }
 
-// ===== GET /api/reseller/plans =====
-// Returns available plans with pricing info
+// ===== GET /api/reseller/plans (Updated with encryption) =====
 router.get('/plans', resellerAuth, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
     if (!reseller || reseller.isBlocked) {
-      return res.status(403).json({ message: 'Account is not active' });
+      return sendEncryptedError(res, 403, 'Account is not active');
     }
 
-    res.json({
+    const responseData = {
       plans: PLANS.map(plan => ({
         label: plan.label,
         displayName: plan.displayName,
@@ -561,116 +713,55 @@ router.get('/plans', resellerAuth, async (req, res) => {
         multiplier: plan.multiplier,
         description: `${plan.days} days of Pro access with 30 attacks per day`
       })),
-      myCredits: reseller.credits
+      myCredits: reseller.credits,
+      timestamp: Date.now()
+    };
+
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+
+    return res.json({
+      encrypted: encryptedResponse,
+      hash: responseHash,
     });
   } catch (err) {
     console.error('❌ Get plans error:', err);
-    res.status(500).json({ message: 'Failed to fetch plans' });
+    return sendEncryptedError(res, 500, 'Failed to fetch plans');
   }
 });
 
-// ===== GET /api/reseller/stats =====
-// Returns reseller statistics
+// ===== GET /api/reseller/stats (Updated with encryption) =====
 router.get('/stats', resellerAuth, async (req, res) => {
   try {
     const reseller = await Reseller.findById(req.resellerId);
     if (!reseller || reseller.isBlocked) {
-      return res.status(403).json({ message: 'Account is not active' });
+      return sendEncryptedError(res, 403, 'Account is not active');
     }
 
-    // Get count of users who have pro subscription (you may need to track which reseller gave it)
-    // For now, just return basic stats
     const usersServed = await User.countDocuments({
       'subscription.type': 'pro',
       'subscription.expiresAt': { $gt: new Date() }
     });
 
-    res.json({
+    const responseData = {
       credits: reseller.credits,
       totalGiven: reseller.totalGiven,
       usersServed: usersServed,
       lastLogin: reseller.lastLogin,
-      createdAt: reseller.createdAt
+      createdAt: reseller.createdAt,
+      timestamp: Date.now()
+    };
+
+    const encryptedResponse = encryptResponse(responseData);
+    const responseHash = createHash(responseData);
+
+    return res.json({
+      encrypted: encryptedResponse,
+      hash: responseHash,
     });
   } catch (err) {
     console.error('❌ Get stats error:', err);
-    res.status(500).json({ message: 'Failed to fetch stats' });
-  }
-});
-
-// ===== POST /api/reseller/add-credits =====
-// Admin can add credits to reseller (protected by secret)
-router.post('/add-credits', resellerAuth, async (req, res) => {
-  try {
-    const reseller = await Reseller.findById(req.resellerId);
-    if (!reseller || reseller.isBlocked) {
-      return res.status(403).json({ message: 'Account is not active' });
-    }
-
-    const { amount, secret } = req.body;
-
-    // Verify special secret for adding credits
-    if (secret !== process.env.RESELLER_ADD_CREDITS_SECRET) {
-      return res.status(403).json({ message: 'Unauthorized' });
-    }
-
-    if (!amount || amount < 1 || amount > 100000) {
-      return res.status(400).json({ message: 'Invalid amount' });
-    }
-
-    reseller.credits += amount;
-    await reseller.save();
-
-    await createAuditLog({
-      actorType: 'reseller',
-      actorId: reseller._id,
-      action: 'ADD_CREDITS',
-      targetId: reseller._id,
-      targetType: 'reseller',
-      changes: { added: amount, newTotal: reseller.credits },
-      ip: req.ip,
-      userAgent: req.headers['user-agent'],
-      success: true
-    });
-
-    res.json({
-      message: `Added ${amount} credits`,
-      credits: reseller.credits
-    });
-  } catch (err) {
-    console.error('❌ Add credits error:', err);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// ===== GET /api/reseller/audit-logs =====
-router.get('/audit-logs', resellerAuth, async (req, res) => {
-  try {
-    const { page, limit } = validation.validatePaginationQuery(req.query);
-
-    const logs = await AuditLog.find({
-      actorId: req.resellerId,
-      actorType: 'reseller'
-    })
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
-
-    const total = await AuditLog.countDocuments({
-      actorId: req.resellerId,
-      actorType: 'reseller'
-    });
-
-    res.json({
-      logs,
-      total,
-      page,
-      pages: Math.ceil(total / limit)
-    });
-  } catch (err) {
-    console.error('❌ Audit logs error:', err);
-    res.status(500).json({ message: 'Failed to fetch audit logs' });
+    return sendEncryptedError(res, 500, 'Failed to fetch stats');
   }
 });
 
