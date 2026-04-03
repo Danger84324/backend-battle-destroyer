@@ -40,6 +40,13 @@ function createHash(data) {
   return CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
 }
 
+function sendEncryptedError(res, statusCode, message) {
+  const errorResponse = { success: false, message };
+  const encryptedError = encryptResponse(errorResponse);
+  const errorHash = createHash(errorResponse);
+  return res.status(statusCode).json({ encrypted: encryptedError, hash: errorHash });
+}
+
 /* ─── Shared IP extractor ─────────────────────────────────────── */
 
 function getIp(req) {
@@ -66,91 +73,80 @@ router.post('/signup', async (req, res) => {
   try {
     const { encrypted, hash, clientVersion } = req.body;
 
-    // Check if encrypted data exists
     if (!encrypted || !hash) {
-      return res.status(400).json({ message: 'Encrypted data required' });
+      return sendEncryptedError(res, 400, 'Encrypted data required');
     }
 
-    // Decrypt the data
     let decryptedData;
     try {
       decryptedData = decryptData(encrypted);
     } catch (err) {
-      return res.status(400).json({ message: 'Invalid encrypted payload' });
+      return sendEncryptedError(res, 400, 'Invalid encrypted payload');
     }
 
-    // Verify hash integrity
     if (!verifyHash(decryptedData, hash)) {
-      return res.status(400).json({ message: 'Data integrity check failed' });
+      return sendEncryptedError(res, 400, 'Data integrity check failed');
     }
 
-    // Check timestamp to prevent replay attacks (allow 5 minutes window)
     const currentTime = Date.now();
     const timeDiff = Math.abs(currentTime - decryptedData.timestamp);
     if (timeDiff > 5 * 60 * 1000) {
-      return res.status(400).json({ message: 'Request expired. Please try again.' });
+      return sendEncryptedError(res, 400, 'Request expired. Please try again.');
     }
 
-    const {
-      username, email, password,
-      fingerprint, referralCode,
-      captchaData,
-      hp,
-    } = decryptedData;
+    const { username, email, password, fingerprint, referralCode, captchaData, hp } = decryptedData;
 
-    /* Honeypot check */
     if (hp) {
-      return res.status(201).json({ message: 'Account created successfully!' });
+      // For honeypot, still return encrypted response
+      const responseData = { success: true, message: 'Account created successfully!' };
+      const encryptedResponse = encryptResponse(responseData);
+      const responseHash = createHash(responseData);
+      return res.status(201).json({ encrypted: encryptedResponse, hash: responseHash });
     }
 
-    /* Required fields */
     if (!username || !email || !password || !captchaData) {
-      return res.status(400).json({ message: 'All fields are required' });
+      return sendEncryptedError(res, 400, 'All fields are required');
     }
 
-    /* Captcha verification - FIXED for hCaptcha */
     const ip = getIp(req);
-    
-    // Extract token from captchaData (which comes from frontend as { token, ekey, timestamp })
     const captchaToken = captchaData.token || captchaData;
-    
-    const captcha = await verifyCaptcha(
-      captchaToken,  // Pass just the token string
-      null,          // No hash needed
-      ip
-    );
+    const captcha = await verifyCaptcha(captchaToken, null, ip);
 
     if (!captcha.ok) {
       console.log(`[Signup] Captcha failed for ${email}: ${captcha.reason}`);
-      return res.status(400).json({ message: captcha.reason || 'Captcha verification failed' });
+      return sendEncryptedError(res, 400, captcha.reason || 'Captcha verification failed');
     }
 
-    console.log(`[Signup] Captcha passed for ${email}`);
-
-    /* Password strength */
     const pwErrors = validatePassword(password);
-    if (pwErrors.length) return res.status(400).json({ message: pwErrors[0] });
-
-    /* Username format */
-    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
-      return res.status(400).json({ message: 'Username must be 3–20 alphanumeric characters' });
+    if (pwErrors.length) {
+      return sendEncryptedError(res, 400, pwErrors[0]);
     }
 
-    /* Internal IP flag */
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      return sendEncryptedError(res, 400, 'Username must be 3–20 alphanumeric characters');
+    }
+
     const isInternalIp = /^(10\.|172\.16\.|192\.168\.|127\.)/.test(ip);
+    
+    // Better duplicate error messages
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    if (existingUser) {
+      if (existingUser.email === email) {
+        return sendEncryptedError(res, 400, 'Email already registered. Please use a different email or login.');
+      }
+      if (existingUser.username === username) {
+        return sendEncryptedError(res, 400, 'Username already taken. Please choose a different username.');
+      }
+    }
 
-    /* Duplicate check */
-    const exists = await User.findOne({ $or: [{ email }, { username }] });
-    if (exists) return res.status(400).json({ message: 'Email or username already taken' });
-
-    /* Referral code */
     let referrer = null;
     if (referralCode) {
       referrer = await User.findOne({ referralCode: referralCode.trim() });
-      if (!referrer) return res.status(400).json({ message: 'Invalid referral code' });
+      if (!referrer) {
+        return sendEncryptedError(res, 400, 'Invalid referral code. Please check and try again.');
+      }
     }
 
-    /* Abuse / duplicate device check */
     const abuseOrClauses = [];
     if (!isInternalIp && ip) abuseOrClauses.push({ ipAddress: ip });
     if (fingerprint) abuseOrClauses.push({ fingerprint });
@@ -159,9 +155,8 @@ router.post('/signup', async (req, res) => {
       ? await User.findOne({ $or: abuseOrClauses })
       : null;
 
-    /* Self-referral guard */
     if (referrer && abuseCheck && abuseCheck._id.toString() === referrer._id.toString()) {
-      return res.status(400).json({ message: 'Cannot use your own referral code' });
+      return sendEncryptedError(res, 400, 'Cannot use your own referral code');
     }
 
     const isNewUniqueUser = !abuseCheck;
@@ -169,7 +164,6 @@ router.post('/signup', async (req, res) => {
 
     console.log(`[Signup] ${username} | IP: ${ip} | credits: ${startingCredits}`);
 
-    /* Create user */
     const hashed = await bcrypt.hash(password, 12);
     const user = new User({
       username,
@@ -190,7 +184,6 @@ router.post('/signup', async (req, res) => {
 
     await user.save();
 
-    /* Referral rewards */
     if (referrer && isNewUniqueUser) {
       await User.findByIdAndUpdate(referrer._id, { $inc: { credits: 2, referralCount: 1 } });
       await User.findByIdAndUpdate(user._id, { $inc: { credits: 2 } });
@@ -198,17 +191,14 @@ router.post('/signup', async (req, res) => {
       console.log(`[Referral] ${referrer.username} +2 | ${username} +2`);
     }
 
-    /* JWT */
     const token = jwt.sign(
       { id: user._id, userId: user.userId },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    /* Global stats */
     await Stats.findByIdAndUpdate('global', { $inc: { totalUsers: 1 } }, { upsert: true });
 
-    /* Prepare response data */
     const responseData = {
       success: true,
       message: 'Account created successfully! You received 10 free credits!',
@@ -228,7 +218,6 @@ router.post('/signup', async (req, res) => {
       timestamp: Date.now(),
     };
 
-    /* Encrypt response */
     const encryptedResponse = encryptResponse(responseData);
     const responseHash = createHash(responseData);
 
@@ -241,91 +230,70 @@ router.post('/signup', async (req, res) => {
     console.error('Signup error:', err);
     if (err.code === 11000) {
       const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      const errorResponse = { success: false, message: `${field} already taken. Please try again.` };
-      const encryptedError = encryptResponse(errorResponse);
-      const errorHash = createHash(errorResponse);
-      return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+      const message = field === 'email' 
+        ? 'Email already registered. Please use a different email.'
+        : 'Username already taken. Please choose a different username.';
+      return sendEncryptedError(res, 400, message);
     }
-    const errorResponse = { success: false, message: 'Server error. Please try again.' };
-    const encryptedError = encryptResponse(errorResponse);
-    const errorHash = createHash(errorResponse);
-    return res.status(500).json({ encrypted: encryptedError, hash: errorHash });
+    return sendEncryptedError(res, 500, 'Server error. Please try again later.');
   }
 });
-
 /* ─── LOGIN with hCaptcha ────────────────────────────────── */
 
 router.post('/login', async (req, res) => {
   try {
     const { encrypted, hash, clientVersion } = req.body;
 
-    // Check if encrypted data exists
     if (!encrypted || !hash) {
-      return res.status(400).json({ message: 'Encrypted data required' });
+      return sendEncryptedError(res, 400, 'Encrypted data required');
     }
 
-    // Decrypt the data
     let decryptedData;
     try {
       decryptedData = decryptData(encrypted);
     } catch (err) {
-      return res.status(400).json({ message: 'Invalid encrypted payload' });
+      return sendEncryptedError(res, 400, 'Invalid encrypted payload');
     }
 
-    // Verify hash integrity
     if (!verifyHash(decryptedData, hash)) {
-      return res.status(400).json({ message: 'Data integrity check failed' });
+      return sendEncryptedError(res, 400, 'Data integrity check failed');
     }
 
-    // Check timestamp
     const currentTime = Date.now();
     const timeDiff = Math.abs(currentTime - decryptedData.timestamp);
     if (timeDiff > 5 * 60 * 1000) {
-      return res.status(400).json({ message: 'Request expired. Please try again.' });
+      return sendEncryptedError(res, 400, 'Request expired. Please try again.');
     }
 
     const { email, password, captchaData, hp } = decryptedData;
 
-    /* Honeypot */
-    if (hp) return res.status(400).json({ message: 'Invalid request' });
-
-    if (!email || !password || !captchaData) {
-      return res.status(400).json({ message: 'All fields are required' });
+    if (hp) {
+      return sendEncryptedError(res, 400, 'Invalid request');
     }
 
-    /* Captcha verification - FIXED for hCaptcha */
+    if (!email || !password || !captchaData) {
+      return sendEncryptedError(res, 400, 'All fields are required');
+    }
+
     const ip = getIp(req);
-    
-    // Extract token from captchaData
     const captchaToken = captchaData.token || captchaData;
-    
-    const captcha = await verifyCaptcha(  // ✅ Added 'await' keyword
-      captchaToken,  // ✅ Pass just the token
-      null,          // ✅ No hash needed
-      ip
-    );
+    const captcha = await verifyCaptcha(captchaToken, null, ip);
 
     if (!captcha.ok) {
       console.log(`[Login] Captcha failed for ${email}: ${captcha.reason}`);
-      return res.status(400).json({ message: captcha.reason || 'Captcha verification failed' });
+      return sendEncryptedError(res, 400, captcha.reason || 'Captcha verification failed');
     }
 
     console.log(`[Login] Captcha passed for ${email}`);
 
-    /* Credentials */
     const user = await User.findOne({ email });
-    const credError = { success: false, message: 'Invalid email or password' };
     if (!user) {
-      const encryptedError = encryptResponse(credError);
-      const errorHash = createHash(credError);
-      return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+      return sendEncryptedError(res, 400, 'Invalid email or password');
     }
 
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
-      const encryptedError = encryptResponse(credError);
-      const errorHash = createHash(credError);
-      return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
+      return sendEncryptedError(res, 400, 'Invalid email or password');
     }
 
     await user.checkAndResetDailyCredits();
@@ -336,7 +304,6 @@ router.post('/login', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    /* Prepare response data */
     const responseData = {
       success: true,
       token,
@@ -356,7 +323,6 @@ router.post('/login', async (req, res) => {
       timestamp: Date.now(),
     };
 
-    /* Encrypt response */
     const encryptedResponse = encryptResponse(responseData);
     const responseHash = createHash(responseData);
 
@@ -367,10 +333,7 @@ router.post('/login', async (req, res) => {
 
   } catch (err) {
     console.error('Login error:', err);
-    const errorResponse = { success: false, message: 'Server error. Please try again.' };
-    const encryptedError = encryptResponse(errorResponse);
-    const errorHash = createHash(errorResponse);
-    return res.status(500).json({ encrypted: encryptedError, hash: errorHash });
+    return sendEncryptedError(res, 500, 'Server error. Please try again later.');
   }
 });
 
