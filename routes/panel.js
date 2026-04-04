@@ -316,20 +316,63 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
             }
         );
 
-        console.log(`[ATTACK] ${user.username} → ${ip}:${portNum} ${durNum}s | API: ${response.status} | Type: ${user.isProUser() ? 'PRO' : 'FREE'}`);
+        console.log(`[ATTACK] ${user.username} → ${ip}:${portNum} ${durNum}s | API: ${response.status} | Response:`, response.data);
 
-        if (response.status !== 200 || response.data?.error) {
-            if (response.data?.error?.includes('Max concurrent')) {
-                const errorResponse = { message: 'Server busy. Please wait 5 seconds and try again.', cooldown: 5 };
-                const encryptedError = encryptResponse(errorResponse);
-                const errorHash = createHash(errorResponse);
-                return res.status(429).json({ encrypted: encryptedError, hash: errorHash });
-            }
-            const errorResponse = { message: response.data?.error || 'Failed to start attack' };
+        // ===== FIXED: Check for status 200 first =====
+        if (response.status !== 200) {
+            console.error(`[ATTACK] Non-200 status: ${response.status}`);
+            const errorResponse = { 
+                message: 'Service temporarily unavailable. Please try again in a few moments.',
+                retryAfter: 5
+            };
             const encryptedError = encryptResponse(errorResponse);
             const errorHash = createHash(errorResponse);
-            return res.status(response.status || 400).json({ encrypted: encryptedError, hash: errorHash });
+            return res.status(503).json({ encrypted: encryptedError, hash: errorHash });
         }
+
+        // ===== CHECK LAUNCHED VALUE =====
+        const launched = response.data?.launched;
+        const total = response.data?.total;
+
+        if (launched === undefined) {
+            console.error(`[ATTACK] Missing 'launched' field in response`);
+            const errorResponse = { 
+                message: 'Invalid response from attack service. Please try again.',
+                retryAfter: 3
+            };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(500).json({ encrypted: encryptedError, hash: errorHash });
+        }
+
+        // Check if attack failed due to amplification connection error
+        if (launched === 0) {
+            console.error(`[ATTACK] Attack failed - launched=${launched}, total=${total}`);
+            const errorResponse = { 
+                message: 'Unable to connect to amplification servers. Please try again in a few moments.',
+                reason: 'amplification_connection_error',
+                retryAfter: 5,
+                details: total ? `Only ${total} of 1 attack launched` : 'Connection failed'
+            };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(503).json({ encrypted: encryptedError, hash: errorHash });
+        }
+
+        // Check if launch was successful (launched === 1)
+        if (launched !== 1) {
+            console.error(`[ATTACK] Unexpected launched value: ${launched}`);
+            const errorResponse = { 
+                message: 'Unexpected response from attack service. Please try again.',
+                retryAfter: 3
+            };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(500).json({ encrypted: encryptedError, hash: errorHash });
+        }
+
+        // ===== SUCCESS: Attack launched successfully =====
+        console.log(`[ATTACK] ✅ Successfully launched attack for ${user.username} | Launched: ${launched}/${total}`);
 
         // Use one attack
         await user.useAttack();
@@ -346,8 +389,8 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
 
         const responseData = {
             message: user.isProUser()
-                ? `Attack launched! (${remainingAttacks} attacks remaining today)`
-                : `Attack launched! (${remainingAttacks} credits remaining)`,
+                ? `Attack launched successfully! (${remainingAttacks} attacks remaining today)`
+                : `Attack launched successfully! (${remainingAttacks} credits remaining)`,
             attack: { ip, port: portNum, duration: durNum, startedAt },
             remainingAttacks,
             isPro: user.isProUser(),
@@ -359,6 +402,11 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
                 credits: user.credits,
                 isPro: user.isProUser(),
                 remainingAttacks
+            },
+            serviceStatus: {
+                launched: launched,
+                total: total,
+                confirmed: true
             }
         };
 
@@ -368,6 +416,19 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
 
     } catch (err) {
         console.error(`[ERROR] Attack route: ${err.message}`);
+        
+        // Check for axios specific errors
+        if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
+            const errorResponse = { 
+                message: 'Attack service is currently unavailable. Please try again in a few moments.',
+                retryAfter: 5,
+                errorType: 'connection_error'
+            };
+            const encryptedError = encryptResponse(errorResponse);
+            const errorHash = createHash(errorResponse);
+            return res.status(503).json({ encrypted: encryptedError, hash: errorHash });
+        }
+        
         const errorResponse = { message: err.message || 'Server error. Please try again.' };
         const encryptedError = encryptResponse(errorResponse);
         const errorHash = createHash(errorResponse);
