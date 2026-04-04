@@ -22,7 +22,7 @@ const app = express();
 // const captchaRoutes = require('./routes/captchaRoutes');
 
 // ===== TRUST PROXY (for production behind load balancer) =====
-app.set('trust proxy', 2);
+app.set('trust proxy', 1);
 
 // ===== ENFORCE HTTPS IN PRODUCTION =====
 app.use((req, res, next) => {
@@ -31,12 +31,6 @@ app.use((req, res, next) => {
   }
   next();
 });
-
-function getRealIP(req) {
-  return req.headers['cf-connecting-ip']    // Real IP from Cloudflare
-    || req.headers['x-forwarded-for']?.split(',')[0].trim()
-    || req.ip;
-}
 
 // ===== SECURITY HEADERS (Helmet) =====
 app.use(helmet({
@@ -102,7 +96,7 @@ const csrfProtection = csrf({
   cookie: {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'none'
+    sameSite: 'lax'
   }
 });
 
@@ -137,8 +131,9 @@ const resellerSearchLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    return `${getRealIP(req)}:${req.resellerId || 'anonymous'}`;
+    return `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`;
   },
+  validate: { trustProxy: false, xForwardedForHeader: false }
 });
 
 // Global rate limiter (for most API endpoints)
@@ -183,6 +178,7 @@ const adminLimiter = rateLimit({
   keyGenerator: (req) => {
     return `${ipKeyGenerator(req)}:${req.headers['x-admin-token'] || 'anonymous'}`;
   },
+  validate: { trustProxy: false, xForwardedForHeader: false }
 });
 
 // Reseller rate limiter
@@ -194,8 +190,9 @@ const resellerLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: true,
   keyGenerator: (req) => {
-    return `${getRealIP(req)}:${req.resellerId || 'anonymous'}`;
+    return `${ipKeyGenerator(req)}:${req.resellerId || 'anonymous'}`;
   },
+  validate: { trustProxy: false, xForwardedForHeader: false }
 });
 
 // API rate limiter
