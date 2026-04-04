@@ -16,6 +16,8 @@ const { verifyCaptcha } = require('./captcha');
 const CryptoJS = require('crypto-js');
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-key-2024-battle-destroyer';
 
+
+// ===== ENCRYPTION HELPERS (ONLY FOR LOGIN) =====
 function decryptData(encryptedData) {
   try {
     const bytes = CryptoJS.AES.decrypt(encryptedData, ENCRYPTION_KEY);
@@ -36,38 +38,6 @@ function encryptResponse(data) {
 function createHash(data) {
   const jsonString = JSON.stringify(data);
   return CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
-}
-
-function sendEncryptedError(res, statusCode, message) {
-  const errorResponse = { success: false, message };
-  const encryptedError = encryptResponse(errorResponse);
-  const errorHash = createHash(errorResponse);
-  return res.status(statusCode).json({ encrypted: encryptedError, hash: errorHash });
-}
-
-function encryptData(data) {
-    const jsonString = JSON.stringify({
-        ...data,
-        timestamp: Date.now()
-    });
-    return CryptoJS.AES.encrypt(jsonString, ENCRYPTION_KEY).toString();
-}
-
-function decryptData(encryptedData) {
-    try {
-        const bytes = CryptoJS.AES.decrypt(encryptedData, ENCRYPTION_KEY);
-        const decrypted = bytes.toString(CryptoJS.enc.Utf8);
-        if (!decrypted) throw new Error('Decryption failed');
-        return JSON.parse(decrypted);
-    } catch (error) {
-        console.error('Decryption error:', error);
-        throw new Error('Invalid encrypted data');
-    }
-}
-
-function createHash(data) {
-    const jsonString = JSON.stringify(data);
-    return CryptoJS.SHA256(jsonString + ENCRYPTION_KEY).toString();
 }
 
 // ===== REDIS SESSION STORE =====
@@ -153,34 +123,15 @@ router.post('/api-users/:id/extend', adminAuth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
-    // Handle encrypted request
-    let requestData = req.body;
-    if (req.body.encrypted && req.body.hash) {
-      try {
-        const decrypted = decryptData(req.body.encrypted);
-        const calculatedHash = createHash(decrypted);
-        if (calculatedHash !== req.body.hash) {
-          return res.status(400).json({ message: 'Request integrity check failed' });
-        }
-        requestData = decrypted;
-      } catch (err) {
-        console.error('Decryption error:', err);
-        return res.status(400).json({ message: 'Invalid encrypted data' });
-      }
-    }
+    const { days } = req.body;
 
-    const { days } = requestData;
-
-    // Better validation with more detailed error
     if (days === undefined || days === null) {
       return res.status(400).json({ message: 'Days parameter is required' });
     }
     
     const daysNum = parseInt(days);
     if (isNaN(daysNum) || daysNum < 1 || daysNum > 365) {
-      return res.status(400).json({ 
-        message: `Days must be between 1 and 365. Received: ${days}` 
-      });
+      return res.status(400).json({ message: `Days must be between 1 and 365. Received: ${days}` });
     }
 
     const apiUser = await ApiUser.findById(req.params.id);
@@ -190,17 +141,6 @@ router.post('/api-users/:id/extend', adminAuth, async (req, res) => {
 
     const oldExpiry = apiUser.expiresAt;
     const newExpiry = await apiUser.extendExpiration(daysNum);
-
-    // Send encrypted response
-    const responseData = {
-      success: true,
-      message: `API user expiration extended by ${daysNum} days`,
-      expiresAt: newExpiry,
-      daysRemaining: apiUser.getDaysRemaining()
-    };
-    
-    const encrypted = encryptData(responseData);
-    const hash = createHash(responseData);
     
     await createAuditLog({
       actorType: 'admin',
@@ -214,7 +154,12 @@ router.post('/api-users/:id/extend', adminAuth, async (req, res) => {
       success: true
     });
 
-    res.json({ encrypted, hash });
+    res.json({
+      success: true,
+      message: `API user expiration extended by ${daysNum} days`,
+      expiresAt: newExpiry,
+      daysRemaining: apiUser.getDaysRemaining()
+    });
   } catch (err) {
     console.error('❌ Extend API user error:', err);
     res.status(500).json({ message: 'Failed to extend expiration: ' + err.message });
@@ -302,7 +247,6 @@ router.get('/api-users', adminAuth, async (req, res) => {
       .limit(limit)
       .lean();
 
-    // Add real-time info
     const usersWithInfo = apiUsers.map(user => ({
       ...user,
       currentActive: user.activeAttacks?.filter(a => new Date(a.expiresAt) > new Date()).length || 0,
@@ -310,202 +254,125 @@ router.get('/api-users', adminAuth, async (req, res) => {
       daysRemaining: user.expiresAt ? Math.max(0, Math.ceil((new Date(user.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))) : null
     }));
 
-    res.json({
-      users: usersWithInfo,
-      total,
-      totalPages,
-      currentPage: page
-    });
+    res.json({ users: usersWithInfo, total, totalPages, currentPage: page });
   } catch (err) {
     console.error('❌ Get API users error:', err);
     res.status(500).json({ message: 'Failed to fetch API users' });
   }
 });
 
-// CREATE API user
+// CREATE API user (PLAIN JSON)
 router.post('/api-users', adminAuth, async (req, res) => {
-    try {
-        console.log('=== CREATE API USER REQUEST ===');
-        
-        let requestData = req.body;
-        
-        // Handle encrypted request
-        if (req.body.encrypted && req.body.hash) {
-            try {
-                const decryptedData = decryptData(req.body.encrypted);
-                const calculatedHash = createHash(decryptedData);
-                
-                if (calculatedHash !== req.body.hash) {
-                    return res.status(400).json({ message: 'Data integrity check failed' });
-                }
-                
-                const currentTime = Date.now();
-                const timeDiff = Math.abs(currentTime - (decryptedData.timestamp || currentTime));
-                
-                if (timeDiff > 5 * 60 * 1000) {
-                    return res.status(400).json({ message: 'Request expired. Please try again.' });
-                }
-                
-                requestData = decryptedData;
-            } catch (err) {
-                console.error('Decryption error:', err);
-                return res.status(400).json({ message: 'Invalid encrypted payload' });
-            }
-        }
-        
-        let { username, email, maxConcurrent, maxDuration, expirationDays = 30 } = requestData;
+  try {
+    let { username, email, maxConcurrent, maxDuration, expirationDays = 30 } = req.body;
 
-        // Validate and sanitize username
-        if (!username) {
-            return res.status(400).json({ message: 'Username is required' });
-        }
-        
-        username = username.trim().toLowerCase();
-        
-        if (username.length < 3 || username.length > 30) {
-            return res.status(400).json({ message: 'Username must be between 3 and 30 characters' });
-        }
-        
-        // Allow only valid characters
-        const validUsernameRegex = /^[a-zA-Z0-9_.-]+$/;
-        if (!validUsernameRegex.test(username)) {
-            return res.status(400).json({ 
-                message: 'Username can only contain letters, numbers, underscores, dots, and hyphens' 
-            });
-        }
-        
-        // Validate email
-        if (!email) {
-            return res.status(400).json({ message: 'Email is required' });
-        }
-        
-        email = email.trim().toLowerCase();
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-            return res.status(400).json({ message: 'Invalid email format' });
-        }
-
-        // Check if user already exists
-        const existingUser = await ApiUser.findOne({ 
-            $or: [{ username }, { email }] 
-        });
-        
-        if (existingUser) {
-            const field = existingUser.username === username ? 'Username' : 'Email';
-            return res.status(400).json({ message: `${field} already exists` });
-        }
-
-        // Generate unique credentials with collision handling
-        let apiKey, apiSecret, apiSecretHash;
-        
-        try {
-            apiKey = await ApiUser.generateUniqueApiKey();
-            const secretData = await ApiUser.generateUniqueApiSecret();
-            apiSecret = secretData.raw;
-            apiSecretHash = secretData.hashed;
-        } catch (err) {
-            console.error('Credential generation error:', err);
-            return res.status(500).json({ message: 'Failed to generate unique credentials. Please try again.' });
-        }
-
-        // Calculate expiration date
-        const expiresAt = expirationDays > 0 
-            ? new Date(Date.now() + expirationDays * 24 * 60 * 60 * 1000) 
-            : null;
-
-        // Create API user
-        const apiUser = new ApiUser({
-            username,
-            email,
-            apiKey,
-            apiSecretHash,
-            limits: {
-                maxConcurrent: maxConcurrent || 2,
-                maxDuration: maxDuration || 300
-            },
-            status: 'active',
-            expiresAt: expiresAt,
-            createdBy: req.userId
-        });
-
-        await apiUser.save();
-
-        // Log the creation
-        await createAuditLog({
-            actorType: 'admin',
-            actorId: req.userId,
-            action: 'CREATE_API_USER',
-            targetId: apiUser._id,
-            targetType: 'api_user',
-            changes: { username, email, maxConcurrent, maxDuration, expirationDays },
-            ip: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: true
-        });
-
-        // Prepare response with the raw apiSecret (only shown once)
-        const responseData = {
-            success: true,
-            message: 'API user created successfully',
-            user: {
-                id: apiUser._id,
-                username: apiUser.username,
-                email: apiUser.email,
-                apiKey: apiUser.apiKey,
-                apiSecret: apiSecret, // Raw secret - only shown once!
-                limits: apiUser.limits,
-                status: apiUser.status,
-                expiresAt: apiUser.expiresAt,
-                daysRemaining: apiUser.getDaysRemaining(),
-                createdAt: apiUser.createdAt
-            },
-            warning: 'Save the apiSecret now! It will not be shown again.',
-            timestamp: Date.now()
-        };
-        
-        // Encrypt the response
-        const encryptedResponse = encryptResponse(responseData);
-        const responseHash = createHash(responseData);
-        
-        res.status(201).json({
-            encrypted: encryptedResponse,
-            hash: responseHash,
-        });
-        
-    } catch (err) {
-        console.error('❌ Create API user error:', err);
-        
-        // Handle duplicate key errors
-        if (err.code === 11000) {
-            const field = Object.keys(err.keyPattern || {})[0];
-            let message = '';
-            switch(field) {
-                case 'username':
-                    message = 'Username already exists';
-                    break;
-                case 'email':
-                    message = 'Email already exists';
-                    break;
-                case 'apiKey':
-                    message = 'API key collision occurred. Please try again.';
-                    break;
-                case 'apiSecretHash':
-                    message = 'System error: Please try again.';
-                    break;
-                default:
-                    message = 'Duplicate entry. Please try again.';
-            }
-            return res.status(400).json({ message });
-        }
-        
-        // Handle validation errors
-        if (err.name === 'ValidationError') {
-            const messages = Object.values(err.errors).map(e => e.message);
-            return res.status(400).json({ message: messages.join(', ') });
-        }
-        
-        res.status(500).json({ message: 'Failed to create API user: ' + err.message });
+    // Validate and sanitize username
+    if (!username) {
+      return res.status(400).json({ message: 'Username is required' });
     }
+    
+    username = username.trim().toLowerCase();
+    
+    if (username.length < 3 || username.length > 30) {
+      return res.status(400).json({ message: 'Username must be between 3 and 30 characters' });
+    }
+    
+    const validUsernameRegex = /^[a-zA-Z0-9_.-]+$/;
+    if (!validUsernameRegex.test(username)) {
+      return res.status(400).json({ 
+        message: 'Username can only contain letters, numbers, underscores, dots, and hyphens' 
+      });
+    }
+    
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+    
+    email = email.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    const existingUser = await ApiUser.findOne({ $or: [{ username }, { email }] });
+    if (existingUser) {
+      const field = existingUser.username === username ? 'Username' : 'Email';
+      return res.status(400).json({ message: `${field} already exists` });
+    }
+
+    let apiKey, apiSecret, apiSecretHash;
+    
+    try {
+      apiKey = await ApiUser.generateUniqueApiKey();
+      const secretData = await ApiUser.generateUniqueApiSecret();
+      apiSecret = secretData.raw;
+      apiSecretHash = secretData.hashed;
+    } catch (err) {
+      console.error('Credential generation error:', err);
+      return res.status(500).json({ message: 'Failed to generate unique credentials. Please try again.' });
+    }
+
+    const expiresAt = expirationDays > 0 
+      ? new Date(Date.now() + expirationDays * 24 * 60 * 60 * 1000) 
+      : null;
+
+    const apiUser = new ApiUser({
+      username,
+      email,
+      apiKey,
+      apiSecretHash,
+      limits: {
+        maxConcurrent: maxConcurrent || 2,
+        maxDuration: maxDuration || 300
+      },
+      status: 'active',
+      expiresAt: expiresAt,
+      createdBy: req.userId
+    });
+
+    await apiUser.save();
+
+    await createAuditLog({
+      actorType: 'admin',
+      actorId: req.userId,
+      action: 'CREATE_API_USER',
+      targetId: apiUser._id,
+      targetType: 'api_user',
+      changes: { username, email, maxConcurrent, maxDuration, expirationDays },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+      success: true
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'API user created successfully',
+      user: {
+        id: apiUser._id,
+        username: apiUser.username,
+        email: apiUser.email,
+        apiKey: apiUser.apiKey,
+        apiSecret: apiSecret,
+        limits: apiUser.limits,
+        status: apiUser.status,
+        expiresAt: apiUser.expiresAt,
+        daysRemaining: apiUser.getDaysRemaining(),
+        createdAt: apiUser.createdAt
+      },
+      warning: 'Save the apiSecret now! It will not be shown again.'
+    });
+  } catch (err) {
+    console.error('❌ Create API user error:', err);
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern || {})[0];
+      return res.status(400).json({ message: `${field} already exists` });
+    }
+    if (err.name === 'ValidationError') {
+      const messages = Object.values(err.errors).map(e => e.message);
+      return res.status(400).json({ message: messages.join(', ') });
+    }
+    res.status(500).json({ message: 'Failed to create API user: ' + err.message });
+  }
 });
 
 // GET single API user
@@ -537,23 +404,7 @@ router.patch('/api-users/:id/limits', adminAuth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
-    // Handle encrypted request
-    let requestData = req.body;
-    if (req.body.encrypted && req.body.hash) {
-      try {
-        const decrypted = decryptData(req.body.encrypted);
-        const calculatedHash = createHash(decrypted);
-        if (calculatedHash !== req.body.hash) {
-          return res.status(400).json({ message: 'Request integrity check failed' });
-        }
-        requestData = decrypted;
-      } catch (err) {
-        console.error('Decryption error:', err);
-        return res.status(400).json({ message: 'Invalid encrypted data' });
-      }
-    }
-
-    const { maxConcurrent, maxDuration, status, resetCurrentActive } = requestData;
+    const { maxConcurrent, maxDuration, status } = req.body;
     const apiUser = await ApiUser.findById(req.params.id);
 
     if (!apiUser) {
@@ -566,30 +417,8 @@ router.patch('/api-users/:id/limits', adminAuth, async (req, res) => {
     if (maxConcurrent !== undefined) apiUser.limits.maxConcurrent = maxConcurrent;
     if (maxDuration !== undefined) apiUser.limits.maxDuration = maxDuration;
     if (status !== undefined) apiUser.status = status;
-    
-    // Optionally reset current active count
-    if (resetCurrentActive === true) {
-      apiUser.currentActive = 0;
-    }
 
     await apiUser.save();
-
-    const responseData = {
-      success: true,
-      message: 'API user updated',
-      user: {
-        id: apiUser._id,
-        username: apiUser.username,
-        limits: apiUser.limits,
-        status: apiUser.status,
-        expiresAt: apiUser.expiresAt,
-        daysRemaining: apiUser.getDaysRemaining(),
-        currentActive: apiUser.currentActive
-      }
-    };
-    
-    const encrypted = encryptData(responseData);
-    const hash = createHash(responseData);
 
     await createAuditLog({
       actorType: 'admin',
@@ -603,7 +432,18 @@ router.patch('/api-users/:id/limits', adminAuth, async (req, res) => {
       success: true
     });
 
-    res.json({ encrypted, hash });
+    res.json({
+      success: true,
+      message: 'API user updated',
+      user: {
+        id: apiUser._id,
+        username: apiUser.username,
+        limits: apiUser.limits,
+        status: apiUser.status,
+        expiresAt: apiUser.expiresAt,
+        daysRemaining: apiUser.getDaysRemaining()
+      }
+    });
   } catch (err) {
     console.error('❌ Update API user error:', err);
     res.status(500).json({ message: 'Failed to update API user: ' + err.message });
@@ -621,7 +461,6 @@ router.post('/api-users/:id/regenerate-secret', adminAuth, async (req, res) => {
       return res.status(404).json({ message: 'API user not found' });
     }
 
-    // Generate new unique secret with collision handling
     let newSecretRaw, newSecretHash;
     let attempts = 0;
     const maxAttempts = 5;
@@ -631,7 +470,6 @@ router.post('/api-users/:id/regenerate-secret', adminAuth, async (req, res) => {
       newSecretRaw = 'as_' + crypto.randomBytes(32).toString('hex');
       newSecretHash = crypto.createHash('sha256').update(newSecretRaw).digest('hex');
       
-      // Check if this hash already exists
       const existing = await ApiUser.findOne({ apiSecretHash: newSecretHash });
       if (!existing) {
         isUnique = true;
@@ -643,7 +481,6 @@ router.post('/api-users/:id/regenerate-secret', adminAuth, async (req, res) => {
       return res.status(500).json({ message: 'Failed to generate unique secret. Please try again.' });
     }
     
-    // Update the user with new hash
     apiUser.apiSecretHash = newSecretHash;
     await apiUser.save();
 
@@ -659,7 +496,6 @@ router.post('/api-users/:id/regenerate-secret', adminAuth, async (req, res) => {
       success: true
     });
 
-    // Return the raw secret (only shown once)
     res.json({
       success: true,
       message: 'API secret regenerated successfully',
@@ -684,7 +520,7 @@ router.delete('/api-users/:id', adminAuth, async (req, res) => {
     }
 
     await createAuditLog({
-      actorType: 'admin',  // FIXED: Changed from 'api_user' to 'admin'
+      actorType: 'admin',
       actorId: req.userId,
       action: 'DELETE_API_USER',
       targetId: req.params.id,
@@ -695,10 +531,7 @@ router.delete('/api-users/:id', adminAuth, async (req, res) => {
       success: true
     });
 
-    res.json({ 
-      success: true,
-      message: 'API user deleted successfully' 
-    });
+    res.json({ success: true, message: 'API user deleted successfully' });
   } catch (err) {
     console.error('❌ Delete API user error:', err);
     res.status(500).json({ message: 'Failed to delete API user: ' + err.message });
@@ -770,7 +603,7 @@ router.get('/api-users/:id/stats', adminAuth, async (req, res) => {
 router.post('/session', async (req, res) => {
   if (!redisClient.isReady) {
     console.error('❌ Redis not connected');
-    return sendEncryptedError(res, 503, 'Service temporarily unavailable. Please try again.');
+    return res.status(503).json({ message: 'Service temporarily unavailable' });
   }
 
   const ip = req.ip;
@@ -787,31 +620,31 @@ router.post('/session', async (req, res) => {
       success: false,
       error: `IP locked for ${seconds}s`
     });
-    return sendEncryptedError(res, 429, `Too many failed attempts. Try again in ${seconds}s.`);
+    return res.status(429).json({ message: `Too many failed attempts. Try again in ${seconds}s.` });
   }
 
   let secret, captchaData;
 
-  // Handle encrypted request
+  // Handle encrypted request (ONLY FOR LOGIN)
   if (req.body.encrypted && req.body.hash) {
     try {
       const decrypted = decryptData(req.body.encrypted);
       const calculatedHash = createHash(decrypted);
 
       if (calculatedHash !== req.body.hash) {
-        return sendEncryptedError(res, 400, 'Data integrity check failed');
+        return res.status(400).json({ message: 'Data integrity check failed' });
       }
 
       const currentTime = Date.now();
-      const timeDiff = Math.abs(currentTime - decrypted.timestamp);
+      const timeDiff = Math.abs(currentTime - (decrypted.timestamp || currentTime));
       if (timeDiff > 5 * 60 * 1000) {
-        return sendEncryptedError(res, 400, 'Request expired. Please try again.');
+        return res.status(400).json({ message: 'Request expired. Please try again.' });
       }
 
       secret = decrypted.secret;
       captchaData = decrypted.captchaData;
     } catch (err) {
-      return sendEncryptedError(res, 400, 'Invalid encrypted payload');
+      return res.status(400).json({ message: 'Invalid encrypted payload' });
     }
   } else {
     secret = req.body.secret;
@@ -820,7 +653,7 @@ router.post('/session', async (req, res) => {
 
   // Verify captcha
   if (!captchaData) {
-    return sendEncryptedError(res, 400, 'Captcha verification required');
+    return res.status(400).json({ message: 'Captcha verification required' });
   }
 
   const captchaToken = captchaData.token || captchaData;
@@ -828,7 +661,7 @@ router.post('/session', async (req, res) => {
 
   if (!captcha.ok) {
     console.log(`[Admin Login] Captcha failed: ${captcha.reason}`);
-    return sendEncryptedError(res, 400, captcha.reason || 'Captcha verification failed');
+    return res.status(400).json({ message: captcha.reason || 'Captcha verification failed' });
   }
 
   if (!secret || typeof secret !== 'string' || secret !== process.env.ADMIN_SECRET) {
@@ -847,10 +680,10 @@ router.post('/session', async (req, res) => {
         success: false,
         error: 'Max attempts exceeded, IP locked for 15 minutes'
       });
-      return sendEncryptedError(res, 429, 'Too many failed attempts. IP locked for 15 minutes.');
+      return res.status(429).json({ message: 'Too many failed attempts. IP locked for 15 minutes.' });
     }
 
-    return sendEncryptedError(res, 401, `Invalid secret. ${MAX_ATTEMPTS - record.count} attempts remaining.`);
+    return res.status(401).json({ message: `Invalid secret. ${MAX_ATTEMPTS - record.count} attempts remaining.` });
   }
 
   failedAttempts.delete(ip);
@@ -874,21 +707,20 @@ router.post('/session', async (req, res) => {
       success: true
     });
 
+    // Send encrypted response (ONLY FOR LOGIN)
     const responseData = { token, expiresIn: SESSION_TTL * 1000 };
     const encryptedResponse = encryptResponse(responseData);
     const responseHash = createHash(responseData);
     res.json({ encrypted: encryptedResponse, hash: responseHash });
   } catch (err) {
     console.error('❌ Redis error:', err);
-    return sendEncryptedError(res, 500, 'Session storage failed');
+    res.status(500).json({ message: 'Session storage failed' });
   }
 });
 
 // ===== DELETE /api/admin/session — explicit logout =====
 router.delete('/session', async (req, res) => {
   const token = req.headers['x-admin-token'];
-  const ip = req.ip;
-
   if (!token) return res.status(400).json({ message: 'No token provided' });
 
   try {
@@ -896,7 +728,7 @@ router.delete('/session', async (req, res) => {
     await createAuditLog({
       actorType: 'admin',
       action: 'LOGOUT',
-      ip,
+      ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
     });
@@ -921,6 +753,7 @@ router.get('/session/check', async (req, res) => {
     res.status(500).json({ message: 'Session check failed' });
   }
 });
+
 
 // ===== POST /api/admin/trigger-daily-reset =====
 router.post('/trigger-daily-reset', adminAuth, async (req, res) => {
@@ -962,30 +795,45 @@ router.post('/trigger-daily-reset', adminAuth, async (req, res) => {
 });
 
 // ===== GET /api/admin/daily-reset-status =====
-router.get('/daily-reset-status', adminAuth, async (req, res) => {
+router.get('/stats', adminAuth, async (req, res) => {
   try {
-    const lastReset = await AuditLog.findOne({
-      action: 'DAILY_RESET',
-      success: true
-    }).sort({ createdAt: -1 });
+    const [total, proUsers, freeUsers, withCredits, today, totalResellers, activeResellers] =
+      await Promise.all([
+        User.countDocuments(),
+        User.countDocuments({
+          'subscription.type': 'pro',
+          'subscription.expiresAt': { $gt: new Date() }
+        }),
+        User.countDocuments({ 'subscription.type': 'free' }),
+        User.countDocuments({ credits: { $gt: 0 } }),
+        User.countDocuments({ createdAt: { $gte: new Date(Date.now() - 86400000) } }),
+        Reseller.countDocuments(),
+        Reseller.countDocuments({ isBlocked: false })
+      ]);
 
-    const status = dailyResetService.getStatus();
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const attacksToday = await User.aggregate([
+      { $match: { 'dailyAttacks.date': { $gte: todayStart } } },
+      { $group: { _id: null, total: { $sum: '$dailyAttacks.count' } } }
+    ]);
+
+    const apiUsersRes = await ApiUser.find().limit(100);
+    const activeApiUsers = apiUsersRes.filter(u => u.status === 'active').length;
 
     res.json({
-      ...status,
-      lastReset: lastReset ? {
-        timestamp: lastReset.createdAt,
-        usersReset: lastReset.changes?.usersReset,
-        proUsersReset: lastReset.changes?.proUsersReset,
-        freeUsersReset: lastReset.changes?.freeUsersReset
-      } : null,
-      manualResetEnabled: !!process.env.ADMIN_RESET_SECRET
+      total, pro: proUsers, free: freeUsers,
+      withCredits, today, totalResellers, activeResellers,
+      attacksToday: attacksToday[0]?.total || 0,
+      totalApiUsers: apiUsersRes.length,
+      activeApiUsers
     });
   } catch (err) {
-    console.error('❌ Reset status error:', err);
-    res.status(500).json({ message: 'Failed to get reset status' });
+    console.error('❌ Stats error:', err);
+    res.status(500).json({ message: 'Failed to fetch stats' });
   }
 });
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  STATS
@@ -1044,7 +892,6 @@ router.get('/users', adminAuth, async (req, res) => {
 
     const conditions = [];
 
-    // ── Search condition ──
     if (search.length > 0) {
       conditions.push({
         $or: [
@@ -1055,7 +902,6 @@ router.get('/users', adminAuth, async (req, res) => {
       });
     }
 
-    // ── Subscription filter ──
     if (subscriptionType === 'pro') {
       conditions.push({
         $and: [
@@ -1075,7 +921,6 @@ router.get('/users', adminAuth, async (req, res) => {
       });
     }
 
-    // ── Combine with $and ──
     const query = conditions.length > 0 ? { $and: conditions } : {};
 
     const total = await User.countDocuments(query);
@@ -1188,37 +1033,19 @@ router.get('/users/:id/status', adminAuth, async (req, res) => {
 
 router.patch('/users/:id', adminAuth, async (req, res) => {
   try {
-    if (!validation.validateObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
-    const allowed = ['credits', 'username', 'email', 'referralCount', 'creditGiven'];
-    const sanitized = validation.validateUserInput(req.body, allowed);
-
-    if (sanitized.username && !validation.validateUsername(sanitized.username)) {
-      return res.status(400).json({ message: 'Invalid username format' });
-    }
-    if (sanitized.email && !validation.validateEmail(sanitized.email)) {
-      return res.status(400).json({ message: 'Invalid email format' });
-    }
-    if (sanitized.credits !== undefined && !validation.validateCredits(sanitized.credits)) {
-      return res.status(400).json({ message: 'Invalid credit amount' });
+    const allowed = ['credits', 'username', 'email'];
+    const sanitized = {};
+    
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) sanitized[key] = req.body[key];
     }
 
     if (req.body.password) {
-      const feedback = validation.getPasswordFeedback(req.body.password);
-      if (feedback.length > 0) {
-        return res.status(400).json({ message: 'Password requirements not met', requirements: feedback });
-      }
       sanitized.password = await bcrypt.hash(req.body.password, 12);
-    }
-
-    const oldUser = await User.findById(req.params.id);
-    const changes = {};
-    for (const key in sanitized) {
-      if (oldUser[key] !== sanitized[key]) {
-        changes[key] = { old: oldUser[key], new: sanitized[key] };
-      }
     }
 
     const user = await User.findByIdAndUpdate(req.params.id, sanitized, { new: true })
@@ -1226,14 +1053,12 @@ router.patch('/users/:id', adminAuth, async (req, res) => {
 
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    user.isPro = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
-
     await createAuditLog({
       actorType: 'admin',
       action: 'UPDATE_USER',
       targetId: req.params.id,
       targetType: 'user',
-      changes,
+      changes: sanitized,
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
@@ -1241,10 +1066,6 @@ router.patch('/users/:id', adminAuth, async (req, res) => {
 
     res.json(user);
   } catch (err) {
-    if (err.code === 11000) {
-      const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      return res.status(400).json({ message: `${field} already in use` });
-    }
     console.error('❌ Update user error:', err);
     res.status(500).json({ message: 'Failed to update user' });
   }
@@ -1252,7 +1073,7 @@ router.patch('/users/:id', adminAuth, async (req, res) => {
 
 router.delete('/users/:id', adminAuth, async (req, res) => {
   try {
-    if (!validation.validateObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
@@ -1264,7 +1085,7 @@ router.delete('/users/:id', adminAuth, async (req, res) => {
       action: 'DELETE_USER',
       targetId: req.params.id,
       targetType: 'user',
-      changes: { username: user.username, email: user.email },
+      changes: { username: user.username },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
@@ -1281,48 +1102,11 @@ router.delete('/users/:id', adminAuth, async (req, res) => {
 
 router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
   try {
-    if (!validation.validateObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
-    // 🔐 DECRYPT THE REQUEST BODY FIRST
-    let requestData = req.body;
-    
-    // Check if the request is encrypted
-    if (req.body.encrypted && req.body.hash) {
-      try {
-        // Decrypt the data
-        const decryptedBytes = CryptoJS.AES.decrypt(req.body.encrypted, ENCRYPTION_KEY);
-        const decryptedString = decryptedBytes.toString(CryptoJS.enc.Utf8);
-        
-        if (!decryptedString) {
-          throw new Error('Decryption failed');
-        }
-        
-        requestData = JSON.parse(decryptedString);
-        
-        // Verify hash
-        const calculatedHash = createHash(requestData);
-        if (calculatedHash !== req.body.hash) {
-          return res.status(400).json({ message: 'Request integrity check failed' });
-        }
-        
-        // Remove timestamp if present
-        if (requestData.timestamp) {
-          delete requestData.timestamp;
-        }
-      } catch (decryptError) {
-        console.error('Decryption error:', decryptError);
-        return res.status(400).json({ message: 'Invalid encrypted data' });
-      }
-    }
-
-    // Now use requestData instead of req.body
-    const { planType, customDays } = requestData;
-    
-    // Debug logging
-    console.log('📥 Received planType:', planType);
-    console.log('📥 Received customDays:', customDays);
+    const { planType, customDays } = req.body;
     
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
@@ -1339,22 +1123,14 @@ router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
       if (!days) {
         return res.status(400).json({ 
           message: 'Invalid plan type', 
-          validPlans: ['week', 'month', 'season', 'custom'],
-          received: planType 
+          validPlans: ['week', 'month', 'season', 'custom']
         });
       }
     }
 
     if (isNaN(days) || days < 1 || days > 365) {
-      return res.status(400).json({ message: 'Days must be between 1 and 365', provided: days });
+      return res.status(400).json({ message: 'Days must be between 1 and 365' });
     }
-
-    const oldSubscription = user.subscription ? {
-      type: user.subscription.type,
-      plan: user.subscription.plan,
-      expiresAt: user.subscription.expiresAt,
-      dailyCredits: user.subscription.dailyCredits
-    } : null;
 
     user.addProSubscription(plan, days);
     await user.save();
@@ -1364,7 +1140,7 @@ router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
       action: 'GIVE_PRO_SUBSCRIPTION',
       targetId: user._id,
       targetType: 'user',
-      changes: { plan, days, oldSubscription, newSubscription: { type: user.subscription.type, plan: user.subscription.plan, expiresAt: user.subscription.expiresAt, dailyCredits: user.subscription.dailyCredits } },
+      changes: { plan, days },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
@@ -1375,44 +1151,31 @@ router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
       user: { 
         id: user._id, 
         username: user.username, 
-        email: user.email, 
         isPro: user.isProUser(), 
-        subscription: { 
-          type: user.subscription.type, 
-          plan: user.subscription.plan, 
-          expiresAt: user.subscription.expiresAt, 
-          dailyCredits: user.subscription.dailyCredits 
-        }, 
         expiresAt: user.subscription.expiresAt, 
         daysLeft: user.getSubscriptionStatus().daysLeft 
       }
     });
   } catch (err) {
     console.error('❌ Give pro error:', err);
-    res.status(500).json({ message: 'Failed to give pro subscription', error: err.message });
+    res.status(500).json({ message: 'Failed to give pro subscription' });
   }
 });
 
 router.delete('/users/:id/remove-pro', adminAuth, async (req, res) => {
   try {
-    if (!validation.validateObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    const oldSubscription = user.subscription ? { ...user.subscription.toObject?.() || user.subscription } : null;
-
     user.subscription.type = 'free';
     user.subscription.plan = 'none';
     user.subscription.expiresAt = null;
     user.subscription.dailyCredits = 10;
     user.subscription.lastCreditReset = new Date();
-    user.isPro = false;
-
-    if (user.credits === 0) user.credits = 10;
-
     await user.save();
 
     await createAuditLog({
@@ -1420,16 +1183,16 @@ router.delete('/users/:id/remove-pro', adminAuth, async (req, res) => {
       action: 'REMOVE_PRO_SUBSCRIPTION',
       targetId: user._id,
       targetType: 'user',
-      changes: { oldSubscription, newSubscription: user.subscription },
+      changes: {},
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
     });
 
-    res.json({ message: 'Pro subscription removed', user: { id: user._id, username: user.username, email: user.email, isPro: false, subscription: user.subscription, credits: user.credits } });
+    res.json({ message: 'Pro subscription removed' });
   } catch (err) {
     console.error('❌ Remove pro error:', err);
-    res.status(500).json({ message: 'Failed to remove pro subscription', error: err.message });
+    res.status(500).json({ message: 'Failed to remove pro subscription' });
   }
 });
 
@@ -1791,7 +1554,6 @@ router.get('/resellers', adminAuth, async (req, res) => {
     let page = parseInt(req.query.page) || 1;
     let limit = parseInt(req.query.limit) || 50;
     const search = req.query.search ? String(req.query.search).trim() : '';
-    const isBlocked = req.query.isBlocked;
 
     if (page < 1) page = 1;
     if (limit < 1 || limit > 100) limit = 50;
@@ -1803,7 +1565,6 @@ router.get('/resellers', adminAuth, async (req, res) => {
         { email: { $regex: search, $options: 'i' } }
       ];
     }
-    if (isBlocked !== undefined) query.isBlocked = isBlocked === 'true';
 
     const total = await Reseller.countDocuments(query);
     const totalPages = Math.ceil(total / limit);
@@ -1827,18 +1588,14 @@ router.post('/resellers', adminAuth, async (req, res) => {
   try {
     const { username, email, password, credits = 0 } = req.body;
 
-    if (!username || !validation.validateUsername(username)) {
-      return res.status(400).json({ message: 'Invalid username format' });
+    if (!username || username.length < 3) {
+      return res.status(400).json({ message: 'Username must be at least 3 characters' });
     }
-    if (!email || !validation.validateEmail(email)) {
+    if (!email || !email.includes('@')) {
       return res.status(400).json({ message: 'Invalid email format' });
     }
-    const passwordFeedback = validation.getPasswordFeedback(password);
-    if (passwordFeedback.length > 0) {
-      return res.status(400).json({ message: 'Password requirements not met', requirements: passwordFeedback });
-    }
-    if (!validation.validateCredits(credits, 1000000)) {
-      return res.status(400).json({ message: 'Invalid credit amount' });
+    if (!password || password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
     }
 
     const hashed = await bcrypt.hash(password, 12);
@@ -1855,11 +1612,16 @@ router.post('/resellers', adminAuth, async (req, res) => {
       success: true
     });
 
-    res.status(201).json({ id: reseller._id, username: reseller.username, email: reseller.email, credits: reseller.credits, isBlocked: reseller.isBlocked });
+    res.status(201).json({ 
+      id: reseller._id, 
+      username: reseller.username, 
+      email: reseller.email, 
+      credits: reseller.credits, 
+      isBlocked: reseller.isBlocked 
+    });
   } catch (err) {
     if (err.code === 11000) {
-      const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      return res.status(400).json({ message: `${field} already in use` });
+      return res.status(400).json({ message: 'Username or email already exists' });
     }
     console.error('❌ Create reseller error:', err);
     res.status(500).json({ message: 'Failed to create reseller' });
@@ -1868,38 +1630,22 @@ router.post('/resellers', adminAuth, async (req, res) => {
 
 router.patch('/resellers/:id', adminAuth, async (req, res) => {
   try {
-    if (!validation.validateObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid reseller ID format' });
     }
 
-    const allowed = ['credits', 'isBlocked', 'username', 'email'];
-    const sanitized = validation.validateUserInput(req.body, allowed);
+    const { credits, isBlocked, username, email, password } = req.body;
+    const updateData = {};
+    
+    if (credits !== undefined) updateData.credits = credits;
+    if (isBlocked !== undefined) updateData.isBlocked = isBlocked;
+    if (username) updateData.username = username;
+    if (email) updateData.email = email;
+    if (password) updateData.password = await bcrypt.hash(password, 12);
 
-    if (sanitized.username && !validation.validateUsername(sanitized.username)) {
-      return res.status(400).json({ message: 'Invalid username format' });
-    }
-    if (sanitized.email && !validation.validateEmail(sanitized.email)) {
-      return res.status(400).json({ message: 'Invalid email format' });
-    }
-    if (sanitized.credits !== undefined && !validation.validateCredits(sanitized.credits, 1000000)) {
-      return res.status(400).json({ message: 'Invalid credit amount' });
-    }
-    if (req.body.password) {
-      const feedback = validation.getPasswordFeedback(req.body.password);
-      if (feedback.length > 0) {
-        return res.status(400).json({ message: 'Password requirements not met', requirements: feedback });
-      }
-      sanitized.password = await bcrypt.hash(req.body.password, 12);
-    }
-
-    const oldReseller = await Reseller.findById(req.params.id);
-    const changes = {};
-    for (const key in sanitized) {
-      if (oldReseller[key] !== sanitized[key]) changes[key] = { old: oldReseller[key], new: sanitized[key] };
-    }
-
-    const reseller = await Reseller.findByIdAndUpdate(req.params.id, sanitized, { new: true })
+    const reseller = await Reseller.findByIdAndUpdate(req.params.id, updateData, { new: true })
       .select('-password').lean();
+    
     if (!reseller) return res.status(404).json({ message: 'Reseller not found' });
 
     await createAuditLog({
@@ -1907,7 +1653,7 @@ router.patch('/resellers/:id', adminAuth, async (req, res) => {
       action: 'UPDATE_RESELLER',
       targetId: req.params.id,
       targetType: 'reseller',
-      changes,
+      changes: updateData,
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
@@ -1915,10 +1661,6 @@ router.patch('/resellers/:id', adminAuth, async (req, res) => {
 
     res.json(reseller);
   } catch (err) {
-    if (err.code === 11000) {
-      const field = Object.keys(err.keyPattern || {})[0] || 'field';
-      return res.status(400).json({ message: `${field} already in use` });
-    }
     console.error('❌ Update reseller error:', err);
     res.status(500).json({ message: 'Failed to update reseller' });
   }
@@ -1926,7 +1668,7 @@ router.patch('/resellers/:id', adminAuth, async (req, res) => {
 
 router.delete('/resellers/:id', adminAuth, async (req, res) => {
   try {
-    if (!validation.validateObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid reseller ID format' });
     }
 
@@ -1938,7 +1680,7 @@ router.delete('/resellers/:id', adminAuth, async (req, res) => {
       action: 'DELETE_RESELLER',
       targetId: req.params.id,
       targetType: 'reseller',
-      changes: { username: reseller.username, email: reseller.email },
+      changes: { username: reseller.username },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
