@@ -81,9 +81,7 @@ class AttackTracker extends EventEmitter {
         
         
         for (const [attackId, attack] of this.activeAttacks) {
-            const timeLeft = (attack.expiresAt - now) / 1000;
-            console.log(`  - ${attackId}: expires in ${timeLeft.toFixed(2)}s`);
-            
+            const timeLeft = (attack.expiresAt - now) / 1000;            
             if (attack.expiresAt <= now) {
                 this.activeAttacks.delete(attackId);
                 cleaned++;
