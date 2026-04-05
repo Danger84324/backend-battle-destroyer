@@ -210,15 +210,13 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
             return res.status(400).json({ encrypted: encryptedError, hash: errorHash });
         }
 
-        // ===== UPDATED CAPTCHA VERIFICATION FOR hCaptcha =====
+        // Captcha verification
         const clientIp = getClientIp(req);
-        
-        // Extract token from captchaData (which is { token, ekey, timestamp })
         const captchaToken = captchaData.token || captchaData;
         
         const captchaResult = await verifyCaptcha(
-            captchaToken,  // Pass just the token string
-            null,          // No hash needed for hCaptcha
+            captchaToken,
+            null,
             clientIp
         );
 
@@ -318,7 +316,7 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
 
         console.log(`[ATTACK] ${user.username} → ${ip}:${portNum} ${durNum}s | API: ${response.status} | Response:`, response.data);
 
-        // ===== FIXED: Check for status 200 first =====
+        // Check for status 200 first
         if (response.status !== 200) {
             console.error(`[ATTACK] Non-200 status: ${response.status}`);
             const errorResponse = { 
@@ -330,7 +328,7 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
             return res.status(503).json({ encrypted: encryptedError, hash: errorHash });
         }
 
-        // ===== CHECK LAUNCHED VALUE =====
+        // Check launched value
         const launched = response.data?.launched;
         const total = response.data?.total;
 
@@ -349,7 +347,7 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
         if (launched === 0) {
             console.error(`[ATTACK] Attack failed - launched=${launched}, total=${total}`);
             const errorResponse = { 
-                message: 'Unable to connect to amplification servers. Please try again in a few moments.',
+                message: `Try again can't connect with bgmi servers`,
                 reason: 'amplification_connection_error',
                 retryAfter: 5,
                 details: total ? `Only ${total} of 1 attack launched` : 'Connection failed'
@@ -372,9 +370,10 @@ router.post('/attack', auth, decryptRequest, async (req, res) => {
         }
 
         // ===== SUCCESS: Attack launched successfully =====
+        // ONLY NOW deduct credits when launched === 1
         console.log(`[ATTACK] ✅ Successfully launched attack for ${user.username} | Launched: ${launched}/${total}`);
 
-        // Use one attack
+        // Use one attack (deduct credits)
         await user.useAttack();
         const remainingAttacks = await user.getRemainingAttacks();
 
