@@ -75,32 +75,57 @@ UserSchema.methods.isProUser = function() {
 };
 
 // Check and reset daily credits for pro users
+// User.js - Updated checkAndResetDailyCredits method
 UserSchema.methods.checkAndResetDailyCredits = async function() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   
-  const lastReset = new Date(this.subscription.lastCreditReset);
+  const lastReset = this.subscription.lastCreditReset ? new Date(this.subscription.lastCreditReset) : new Date();
   lastReset.setHours(0, 0, 0, 0);
   
   // Reset if new day
   if (lastReset < today) {
     if (this.isProUser()) {
-      // Pro users get 30 daily credits (free attacks)
+      // Pro users get 30 daily attacks
       this.subscription.dailyCredits = 30;
     } else {
-      // Free users get daily limit of 10 attacks (but they still use credits)
+      // Free users get 1 daily credit (or whatever you want)
       this.subscription.dailyCredits = 1;
     }
     this.subscription.lastCreditReset = new Date();
     
     // Reset daily attack count
-    this.dailyAttacks.count = 0;
-    this.dailyAttacks.date = new Date();
+    this.dailyAttacks = {
+      count: 0,
+      date: new Date()
+    };
     
     await this.save();
+    console.log(`[Daily Reset] Reset daily credits for user ${this.username} to ${this.subscription.dailyCredits}`);
   }
   
   return this.subscription.dailyCredits;
+};
+
+// Also add a method to manually refresh Pro benefits
+UserSchema.methods.refreshProBenefits = async function() {
+  if (this.isProUser()) {
+    // Reset daily credits to 30
+    this.subscription.dailyCredits = 30;
+    this.subscription.lastCreditReset = new Date();
+    
+    // Reset today's attack count
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    this.dailyAttacks = {
+      count: 0,
+      date: today
+    };
+    
+    await this.save();
+    return true;
+  }
+  return false;
 };
 
 // Check if user can attack

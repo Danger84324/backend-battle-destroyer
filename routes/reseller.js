@@ -492,6 +492,8 @@ router.get('/search-user', resellerAuth, resellerSearchLimiter, async (req, res)
 
 // ===== POST /api/reseller/give-pro =====
 // Gives Pro subscription to user, deducts credits from reseller
+// ===== POST /api/reseller/give-pro =====
+// Gives Pro subscription to user, deducts credits from reseller
 router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
   try {
     // Check if request is encrypted
@@ -525,7 +527,7 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
 
     const { userId, planLabel } = requestData;
 
-    console.log('Give Pro Request Data:', { userId, planLabel }); // Debug log
+    console.log('Give Pro Request Data:', { userId, planLabel });
 
     if (!userId || typeof userId !== 'string') {
       return sendEncryptedError(res, 400, 'userId is required');
@@ -559,35 +561,47 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     const oldSubscription = user.subscription ? {
       type: user.subscription.type,
       plan: user.subscription.plan,
-      expiresAt: user.subscription.expiresAt
+      expiresAt: user.subscription.expiresAt,
+      dailyCredits: user.subscription.dailyCredits
     } : null;
 
-    // Give Pro subscription to user
+    // Calculate new expiry date
     const now = new Date();
-    const newExpiry = new Date(now.getTime() + plan.days * 24 * 60 * 60 * 1000);
+    let newExpiry = new Date(now.getTime() + plan.days * 24 * 60 * 60 * 1000);
 
     // Check if user already has active pro subscription
     if (user.subscription?.type === 'pro' && user.subscription?.expiresAt > now) {
-      // Extend existing subscription
+      // EXTEND existing subscription
       const currentExpiry = new Date(user.subscription.expiresAt);
-      const extendedExpiry = new Date(currentExpiry.getTime() + plan.days * 24 * 60 * 60 * 1000);
-      user.subscription.expiresAt = extendedExpiry;
+      newExpiry = new Date(currentExpiry.getTime() + plan.days * 24 * 60 * 60 * 1000);
+      
+      user.subscription.expiresAt = newExpiry;
       user.subscription.plan = plan.label.toLowerCase();
+      // Keep existing daily credits (don't reset, just extend)
     } else {
-      // Create new subscription
+      // CREATE new subscription
       user.subscription = {
         type: 'pro',
         plan: plan.label.toLowerCase(),
         expiresAt: newExpiry,
-        attacksPerDay: 30,
-        startedAt: now
+        dailyCredits: 30, // ✅ Set daily credits to 30 for Pro users
+        lastCreditReset: now
       };
     }
 
     user.isPro = true;
     
-    // Add 30 credits to the user
-    user.credits = (user.credits || 0) + 30;
+    // ✅ Reset daily credits to 30 when upgrading to Pro (or extending)
+    user.subscription.dailyCredits = 30;
+    user.subscription.lastCreditReset = now;
+    
+    // ✅ Reset today's attack count so user can use their new Pro benefits immediately
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    user.dailyAttacks = {
+      count: 0,
+      date: today
+    };
     
     await user.save();
 
@@ -599,10 +613,13 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
 
     // Get updated subscription status
     const isProActive = user.subscription?.type === 'pro' && user.subscription?.expiresAt > new Date();
+    const daysLeft = Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24));
+    
     const subscriptionStatus = isProActive && user.subscription ? {
       plan: user.subscription.plan,
-      daysLeft: Math.ceil((new Date(user.subscription.expiresAt) - new Date()) / (1000 * 60 * 60 * 24)),
-      expiresAt: user.subscription.expiresAt
+      daysLeft: daysLeft,
+      expiresAt: user.subscription.expiresAt,
+      dailyCreditsRemaining: user.subscription.dailyCredits
     } : null;
 
     // Audit log
@@ -618,11 +635,10 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
         creditsUsed: plan.credits,
         customerPrice: plan.customerPrice,
         profit: plan.profit,
-        bonusCreditsGiven: 30,
         oldSubscription,
         newSubscription: user.subscription,
         resellerCreditsLeft: newResellerCredits,
-        userCreditsAfter: user.credits
+        dailyCreditsSet: 30
       },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
@@ -630,12 +646,10 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     });
 
     const responseData = {
-      message: `✅ ${plan.displayName} (${plan.days} days) successfully given to ${user.username}! They now have Pro access and received 30 bonus credits!`,
+      message: `✅ ${plan.displayName} (${plan.days} days) successfully given to ${user.username}! They now have Pro access with 30 daily attacks!`,
       plan: plan.label,
       daysGiven: plan.days,
       creditsUsed: plan.credits,
-      bonusCreditsGiven: 30,
-      customerPrice: plan.customerPrice,
       profit: plan.profit,
       resellerCreditsLeft: newResellerCredits,
       user: {
@@ -643,7 +657,6 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
         username: user.username,
         email: user.email,
         isPro: isProActive,
-        credits: user.credits,
         subscription: subscriptionStatus
       },
       timestamp: Date.now()
