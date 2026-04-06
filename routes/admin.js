@@ -1396,7 +1396,18 @@ router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
       return res.status(400).json({ message: 'Days must be between 1 and 365' });
     }
 
+    // Get old subscription info for audit
+    const oldSubscription = user.subscription ? {
+      type: user.subscription.type,
+      plan: user.subscription.plan,
+      expiresAt: user.subscription.expiresAt
+    } : null;
+
     user.addProSubscription(plan, days);
+    
+    // Add 30 credits to the user
+    user.credits = (user.credits || 0) + 30;
+    
     await user.save();
 
     await createAuditLog({
@@ -1404,20 +1415,28 @@ router.post('/users/:id/give-pro', adminAuth, async (req, res) => {
       action: 'GIVE_PRO_SUBSCRIPTION',
       targetId: user._id,
       targetType: 'user',
-      changes: { plan, days },
+      changes: { 
+        plan, 
+        days,
+        bonusCreditsGiven: 30,
+        userCreditsAfter: user.credits,
+        oldSubscription,
+        newSubscription: user.subscription
+      },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
       success: true
     });
 
     res.json({
-      message: `Pro subscription added successfully for ${days} days`,
+      message: `✅ Pro subscription added successfully for ${days} days with 30 bonus credits!`,
       user: { 
         id: user._id, 
         username: user.username, 
         isPro: user.isProUser(), 
         expiresAt: user.subscription.expiresAt, 
-        daysLeft: user.getSubscriptionStatus().daysLeft 
+        daysLeft: user.getSubscriptionStatus().daysLeft,
+        credits: user.credits
       }
     });
   } catch (err) {
