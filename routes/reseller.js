@@ -585,6 +585,10 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     }
 
     user.isPro = true;
+    
+    // Add 30 credits to the user
+    user.credits = (user.credits || 0) + 30;
+    
     await user.save();
 
     // Deduct credits from reseller
@@ -614,9 +618,11 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
         creditsUsed: plan.credits,
         customerPrice: plan.customerPrice,
         profit: plan.profit,
+        bonusCreditsGiven: 30,
         oldSubscription,
         newSubscription: user.subscription,
-        resellerCreditsLeft: newResellerCredits
+        resellerCreditsLeft: newResellerCredits,
+        userCreditsAfter: user.credits
       },
       ip: req.ip,
       userAgent: req.headers['user-agent'],
@@ -624,10 +630,11 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
     });
 
     const responseData = {
-      message: `✅ ${plan.displayName} (${plan.days} days) successfully given to ${user.username}! They now have Pro access.`,
+      message: `✅ ${plan.displayName} (${plan.days} days) successfully given to ${user.username}! They now have Pro access and received 30 bonus credits!`,
       plan: plan.label,
       daysGiven: plan.days,
       creditsUsed: plan.credits,
+      bonusCreditsGiven: 30,
       customerPrice: plan.customerPrice,
       profit: plan.profit,
       resellerCreditsLeft: newResellerCredits,
@@ -636,6 +643,7 @@ router.post('/give-pro', resellerAuth, actionLimiter, async (req, res) => {
         username: user.username,
         email: user.email,
         isPro: isProActive,
+        credits: user.credits,
         subscription: subscriptionStatus
       },
       timestamp: Date.now()

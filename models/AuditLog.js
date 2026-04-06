@@ -24,7 +24,6 @@ const AuditLogSchema = new mongoose.Schema({
       'ATTACK_STOP',
       'ATTACK_LIMIT_REACHED',
       'USE_CREDITS',
-
       // ── Admin actions ─────────────────────────────────────────────────────
       'SESSION_CREATED',
       'SESSION_INVALIDATED',
