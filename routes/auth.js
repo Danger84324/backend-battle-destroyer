@@ -160,7 +160,7 @@ router.post('/signup', async (req, res) => {
     }
 
     const isNewUniqueUser = !abuseCheck;
-    const startingCredits = isNewUniqueUser ? 1 : 0;
+    const startingCredits = isNewUniqueUser ? 0 : 0;
 
     console.log(`[Signup] ${username} | IP: ${ip} | credits: ${startingCredits}`);
 
@@ -185,9 +185,9 @@ router.post('/signup', async (req, res) => {
     await user.save();
 
     if (referrer && isNewUniqueUser) {
-      await User.findByIdAndUpdate(referrer._id, { $inc: { credits: 2, referralCount: 1 } });
-      await User.findByIdAndUpdate(user._id, { $inc: { credits: 2 } });
-      user.credits += 2;
+      await User.findByIdAndUpdate(referrer._id, { $inc: { credits: 0, referralCount: 1 } });
+      await User.findByIdAndUpdate(user._id, { $inc: { credits: 0 } });
+      user.credits += 0;
       console.log(`[Referral] ${referrer.username} +2 | ${username} +2`);
     }
 
