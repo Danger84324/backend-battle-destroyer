@@ -6,7 +6,6 @@ const CryptoJS = require('crypto-js');
 const User = require('../models/User');
 const Stats = require('../models/Stats');
 const { verifyCaptcha } = require('./captcha'); // Your hCaptcha module
-const { generateOTP, sendOTPEmail, sendWelcomeEmail } = require('../services/emailService');
 
 // Encryption configuration
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-key-2024-battle-destroyer';
@@ -335,10 +334,6 @@ router.post('/complete-signup', async (req, res) => {
     // Give free credits on successful verification
     user.credits += 0; 
     await user.save();
-
-    // Send welcome email
-    const { sendWelcomeEmail } = require('../services/emailService');
-    await sendWelcomeEmail(user.email, user.username);
 
     // Generate JWT token
     const token = jwt.sign(
