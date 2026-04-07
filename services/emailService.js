@@ -9,8 +9,8 @@ try {
     if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
         transporter = nodemailer.createTransport({
             host: 'smtp.gmail.com',
-            port: 587,
-            secure: false,
+            port: 465,
+            secure: true,
             family: 4,          // ← Force IPv4, fixes ENETUNREACH on Railway
             auth: {
                 user: process.env.EMAIL_USER,
@@ -24,6 +24,15 @@ try {
             socketTimeout: 15000,
         });
         transporterReady = true;
+        // Add this after transporterReady = true;
+        transporter.verify((error, success) => {
+            if (error) {
+                console.error('[Email] SMTP connection test FAILED:', error.message);
+                transporterReady = false;
+            } else {
+                console.log('[Email] SMTP connection test PASSED - ready to send');
+            }
+        });
         console.log('[Email] Nodemailer/Gmail initialized successfully');
     } else {
         console.warn('[Email] EMAIL_USER or EMAIL_APP_PASSWORD not found in environment variables');
