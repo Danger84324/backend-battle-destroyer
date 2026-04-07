@@ -6,49 +6,53 @@ let transporter = null;
 let transporterReady = false;
 
 try {
-  if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
-    transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.EMAIL_PORT) || 587,
-      secure: false, // TLS
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_APP_PASSWORD,
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
-    });
-    transporterReady = true;
-    console.log('[Email] Nodemailer/Gmail initialized successfully');
-  } else {
-    console.warn('[Email] EMAIL_USER or EMAIL_APP_PASSWORD not found in environment variables');
-  }
+    if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
+        transporter = nodemailer.createTransport({
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
+            family: 4,          // ← Force IPv4, fixes ENETUNREACH on Railway
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_APP_PASSWORD,
+            },
+            tls: {
+                rejectUnauthorized: false,
+            },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 15000,
+        });
+        transporterReady = true;
+        console.log('[Email] Nodemailer/Gmail initialized successfully');
+    } else {
+        console.warn('[Email] EMAIL_USER or EMAIL_APP_PASSWORD not found in environment variables');
+    }
 } catch (error) {
-  console.error('[Email] Nodemailer init failed:', error.message);
+    console.error('[Email] Nodemailer init failed:', error.message);
 }
 
 // Generate 6-digit OTP
 function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+    return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 // Send OTP email
 async function sendOTPEmail(email, otp, username = '') {
-  if (!transporterReady || !transporter) {
-    console.error('[Email] Nodemailer not configured, cannot send OTP email');
-    return false;
-  }
+    if (!transporterReady || !transporter) {
+        console.error('[Email] Nodemailer not configured, cannot send OTP email');
+        return false;
+    }
 
-  const senderEmail = process.env.EMAIL_USER;
-  const senderName  = process.env.EMAIL_FROM_NAME || 'Battle Destroyer';
+    const senderEmail = process.env.EMAIL_USER;
+    const senderName = process.env.EMAIL_FROM_NAME || 'Battle Destroyer';
 
-  try {
-    const info = await transporter.sendMail({
-      from: `"${senderName}" <${senderEmail}>`,
-      to: email,
-      subject: 'Verify Your Battle Destroyer Account',
-      html: `
+    try {
+        const info = await transporter.sendMail({
+            from: `"${senderName}" <${senderEmail}>`,
+            to: email,
+            subject: 'Verify Your Battle Destroyer Account',
+            html: `
         <!DOCTYPE html>
         <html>
         <head>
@@ -92,33 +96,33 @@ async function sendOTPEmail(email, otp, username = '') {
         </body>
         </html>
       `,
-    });
+        });
 
-    console.log(`[Email] OTP sent to ${email} | MessageId: ${info.messageId}`);
-    return true;
-  } catch (error) {
-    console.error(`[Email] OTP send failed to ${email}: ${error.message}`);
-    return false;
-  }
+        console.log(`[Email] OTP sent to ${email} | MessageId: ${info.messageId}`);
+        return true;
+    } catch (error) {
+        console.error(`[Email] OTP send failed to ${email}: ${error.message}`);
+        return false;
+    }
 }
 
 // Send welcome email
 async function sendWelcomeEmail(email, username) {
-  if (!transporterReady || !transporter) {
-    console.error('[Email] Nodemailer not configured, cannot send welcome email');
-    return false;
-  }
+    if (!transporterReady || !transporter) {
+        console.error('[Email] Nodemailer not configured, cannot send welcome email');
+        return false;
+    }
 
-  const senderEmail = process.env.EMAIL_USER;
-  const senderName  = process.env.EMAIL_FROM_NAME || 'Battle Destroyer';
-  const frontendUrl = process.env.FRONTEND_URL || 'https://battle-destroyer.shop';
+    const senderEmail = process.env.EMAIL_USER;
+    const senderName = process.env.EMAIL_FROM_NAME || 'Battle Destroyer';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://battle-destroyer.shop';
 
-  try {
-    const info = await transporter.sendMail({
-      from: `"${senderName}" <${senderEmail}>`,
-      to: email,
-      subject: 'Welcome to Battle Destroyer!',
-      html: `
+    try {
+        const info = await transporter.sendMail({
+            from: `"${senderName}" <${senderEmail}>`,
+            to: email,
+            subject: 'Welcome to Battle Destroyer!',
+            html: `
         <!DOCTYPE html>
         <html>
         <head>
@@ -160,14 +164,14 @@ async function sendWelcomeEmail(email, username) {
         </body>
         </html>
       `,
-    });
+        });
 
-    console.log(`[Email] Welcome email sent to ${email} | MessageId: ${info.messageId}`);
-    return true;
-  } catch (error) {
-    console.error(`[Email] Welcome email failed to ${email}: ${error.message}`);
-    return false;
-  }
+        console.log(`[Email] Welcome email sent to ${email} | MessageId: ${info.messageId}`);
+        return true;
+    } catch (error) {
+        console.error(`[Email] Welcome email failed to ${email}: ${error.message}`);
+        return false;
+    }
 }
 
 module.exports = { generateOTP, sendOTPEmail, sendWelcomeEmail };
