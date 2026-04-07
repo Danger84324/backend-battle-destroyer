@@ -1,5 +1,5 @@
 // services/emailService.js
-const SibApiV3Sdk = require('@getbrevo/brevo');
+const brevo = require('@getbrevo/brevo');
 
 // Initialize Brevo
 let apiInstance = null;
@@ -7,8 +7,8 @@ let apiKeyConfigured = false;
 
 try {
   if (process.env.BREVO_API_KEY) {
-    apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
-    apiInstance.setApiKey(SibApiV3Sdk.TransactionalEmailsApiApiKeys.apiKey, process.env.BREVO_API_KEY);
+    apiInstance = new brevo.TransactionalEmailsApi();
+    apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, process.env.BREVO_API_KEY);
     apiKeyConfigured = true;
     console.log('[Email] Brevo initialized successfully');
   } else {
@@ -33,7 +33,7 @@ async function sendOTPEmail(email, otp, username = '') {
   const senderEmail = process.env.EMAIL_FROM || process.env.BREVO_SENDER_EMAIL || 'noreply@battle-destroyer.railway.app';
   const senderName = process.env.EMAIL_FROM_NAME || 'Battle Destroyer';
 
-  const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+  const sendSmtpEmail = new brevo.SendSmtpEmail();
   sendSmtpEmail.subject = 'Verify Your Battle Destroyer Account';
   sendSmtpEmail.to = [{ email: email, name: username || email.split('@')[0] }];
   sendSmtpEmail.sender = { email: senderEmail, name: senderName };
@@ -102,7 +102,7 @@ async function sendWelcomeEmail(email, username) {
   const senderName = process.env.EMAIL_FROM_NAME || 'Battle Destroyer';
   const frontendUrl = process.env.FRONTEND_URL || 'https://your-app.railway.app';
 
-  const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+  const sendSmtpEmail = new brevo.SendSmtpEmail();
   sendSmtpEmail.subject = 'Welcome to Battle Destroyer! 🎮';
   sendSmtpEmail.to = [{ email: email, name: username }];
   sendSmtpEmail.sender = { email: senderEmail, name: senderName };
