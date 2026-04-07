@@ -81,14 +81,15 @@ async function decryptRequest(req, res, next) {
 }
 
 // GET /api/panel/me
-router.get('/me', auth, decryptRequest, async (req, res) => {
+// GET /api/panel/me - Simplified version without encryption
+router.get('/me', auth, async (req, res) => {
     try {
+        console.log('[ME] Fetching user for ID:', req.user.id);
         const user = await User.findById(req.user.id).select('-password');
+        
         if (!user) {
-            const errorResponse = { message: 'User not found' };
-            const encryptedError = encryptResponse(errorResponse);
-            const errorHash = createHash(errorResponse);
-            return res.status(404).json({ encrypted: encryptedError, hash: errorHash });
+            console.log('[ME] User not found');
+            return res.status(404).json({ message: 'User not found' });
         }
 
         await user.checkAndResetDailyCredits();
@@ -101,15 +102,12 @@ router.get('/me', auth, decryptRequest, async (req, res) => {
             subscriptionStatus: user.getSubscriptionStatus()
         };
 
-        const encryptedResponse = encryptResponse(responseData);
-        const responseHash = createHash(responseData);
-        res.json({ encrypted: encryptedResponse, hash: responseHash });
+        console.log('[ME] User data sent successfully');
+        // Send without encryption for now
+        res.json(responseData);
     } catch (err) {
-        console.error('Me route error:', err);
-        const errorResponse = { message: 'Server error' };
-        const encryptedError = encryptResponse(errorResponse);
-        const errorHash = createHash(errorResponse);
-        res.status(500).json({ encrypted: encryptedError, hash: errorHash });
+        console.error('[ME] Error:', err);
+        res.status(500).json({ message: 'Server error: ' + err.message });
     }
 });
 

@@ -17,7 +17,7 @@ const bgmiService = require('./services/bgmiService');
 const dailyResetService = require('./services/dailyResetService');
 const ApiUser = require('./models/ApiUser');
 const app = express();
-
+const otpRoutes = require('./routes/otp');
 // Optional: If you want a captcha endpoint, uncomment this
 // const captchaRoutes = require('./routes/captchaRoutes');
 
@@ -72,7 +72,6 @@ const allowedOrigins = [
   'https://battle-destroyer.shop',
   'https://www.battle-destroyer.shop',
   'http://localhost:3000',
-  'https://backend-battle-destroyer-production.up.railway.app',
   'https://api.battle-destroyer.shop',
 ];
 
@@ -211,13 +210,30 @@ const apiRateLimiter = rateLimit({
   skip: (req) => !req.path.startsWith('/api/v1')
 });
 
-// Apply rate limiters
+
+// OTP rate limiters
+const otpSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 3, // 3 requests per 15 minutes
+  message: { message: 'Too many OTP requests. Please wait before trying again.' },
+});
+
+const otpVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { message: 'Too many verification attempts. Please try again later.' },
+});
+
+// Apply to OTP routes
 app.use('/api/', globalLimiter);
 app.use('/api/panel/attack', attackLimiter);
 app.use('/api/admin', adminLimiter);
 app.use('/api/reseller', resellerLimiter);
 app.use('/api/v1', apiExternalRoutes);
 app.use('/api/api-auth', apiAuthRoutes);
+app.use('/api/otp', otpRoutes);
+app.use('/api/otp/send-otp', otpSendLimiter);
+app.use('/api/otp/verify-otp', otpVerifyLimiter);
 // If you want to use the captcha route, uncomment this line:
 // app.use('/api/captcha', captchaRoutes);
 
@@ -257,8 +273,6 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/panel', require('./routes/panel'));
 
 // ===== EXTERNAL API =====
-app.use('/api/v1', apiExternalRoutes);
-
 // ===== ADMIN AND RESELLER ROUTES =====
 app.use('/api/admin', csrfProtection, require('./routes/admin'));
 app.use('/api/reseller', csrfProtection, require('./routes/reseller'));
