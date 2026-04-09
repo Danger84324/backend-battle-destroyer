@@ -22,7 +22,7 @@ const otpRoutes = require('./routes/otp');
 // const captchaRoutes = require('./routes/captchaRoutes');
 
 // ===== TRUST PROXY (for production behind load balancer) =====
-app.set('trust proxy', 2);
+app.set('trust proxy', 1);
 
 // ===== ENFORCE HTTPS IN PRODUCTION =====
 app.use((req, res, next) => {
@@ -363,7 +363,7 @@ mongoose.connect(process.env.MONGO_URI, {
     }, 100);
 
     const PORT = process.env.PORT || 5000;
-    const server = app.listen(PORT, () => {
+    const server = app.listen(PORT, '127.0.0.1', () => {
       console.log(`\n🚀 Server running on port ${PORT}`);
       console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`🔒 HTTPS: ${process.env.NODE_ENV === 'production' ? 'Enforced' : 'Disabled (dev)'}`);
