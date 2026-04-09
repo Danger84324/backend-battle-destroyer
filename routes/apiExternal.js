@@ -96,10 +96,6 @@ router.post('/attack', async (req, res) => {
                 details: 'API key not configured'
             });
         }
-
-        console.log(`[API Attack] Calling external API: ${externalApiUrl}`);
-        console.log(`[API Attack] Request payload:`, { param1: ip, param2: portNum, param3: durationSec });
-
         try {
             // Call external API with the exact format you specified
             const externalResponse = await axios.post(
