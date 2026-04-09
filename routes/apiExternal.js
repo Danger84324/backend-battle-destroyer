@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { authenticateApiUser } = require('../middleware/apiAuthMiddleware');
 const ApiUser = require('../models/ApiUser');
 const attackTracker = require('../services/attackTracker');
-const serveron = true
+const serveron = false
 // Apply authentication middleware
 router.use(authenticateApiUser);
 
@@ -245,6 +245,7 @@ router.post('/attack', async (req, res) => {
         });
     }
 });
+
 // Get active attacks
 router.get('/active', async (req, res) => {
     try {
