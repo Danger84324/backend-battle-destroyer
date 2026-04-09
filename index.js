@@ -31,6 +31,16 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use((req, res, next) => {
+  console.log({
+    cfIP: req.headers['cf-connecting-ip'],
+    xForwardedFor: req.headers['x-forwarded-for'],
+    reqIP: req.ip,
+    realIP: getRealIP(req)
+  });
+  next();
+});
+
 function getRealIP(req) {
   return req.headers['cf-connecting-ip']    // Real IP from Cloudflare
     || req.headers['x-forwarded-for']?.split(',')[0].trim()
