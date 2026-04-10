@@ -174,7 +174,7 @@ router.post('/signup', async (req, res) => {
     // Calculate initial credits
     let initialCredits = 0;
     if (isReferralValid) {
-      initialCredits += 2;
+      initialCredits += 0;
       console.log(`[Signup] New user ${username} gets +2 referral credits`);
     }
 
@@ -209,7 +209,7 @@ router.post('/signup', async (req, res) => {
     // Give referrer their bonus credits
     if (isReferralValid && referrer) {
       await User.findByIdAndUpdate(referrer._id, {
-        $inc: { credits: 2, referralCount: 1 }
+        $inc: { credits: 0, referralCount: 1 }
       });
       const updatedReferrer = await User.findById(referrer._id);
       console.log(`[Referral] ✅ ${referrer.username} +2 credits (now ${updatedReferrer.credits}) | ${username} +2 credits`);
@@ -242,7 +242,7 @@ router.post('/signup', async (req, res) => {
         remainingAttacks: await user.getRemainingAttacks(),
         maxDuration: user.getMaxDuration(),
       },
-      referralBonus: isReferralValid ? 2 : 0,
+      referralBonus: isReferralValid ? 0 : 0,
       timestamp: Date.now(),
     };
 
